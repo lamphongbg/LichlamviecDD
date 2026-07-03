@@ -1019,6 +1019,9 @@ export default function App() {
             staffList={staffList}
             selectedMonth={selectedMonth}
             onChangeMonth={setSelectedMonth}
+            aiReport={aiReport}
+            aiLoading={aiLoading}
+            onTriggerAI={handleTriggerAI}
           />
         ) : (
           <CommunicationCenter
