@@ -1,0 +1,6 @@
+{
+  "name": "Đăng Ký Lịch Làm Việc Điều Dưỡng",
+  "description": "Hệ thống số hóa bảng theo dõi nhân lực điều dưỡng, hỗ trợ đăng ký lịch tuần/tháng, tự động tính toán ngày công và xuất báo cáo gửi ban lãnh đạo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
