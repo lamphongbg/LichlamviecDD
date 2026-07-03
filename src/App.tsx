@@ -134,6 +134,18 @@ export default function App() {
 
   // States for custom modals to bypass browser window.confirm / alert blocks
   const [isResetConfirmOpen, setIsResetConfirmOpen] = useState(false);
+  const [resetScope, setResetScope] = useState<'ALL' | 'YEAR' | 'MONTH' | 'DAY'>('ALL');
+  const [resetDate, setResetDate] = useState<string>(() => {
+    const today = new Date();
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  });
+  const [resetMonth, setResetMonth] = useState<string>(() => {
+    const today = new Date();
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+  });
+  const [resetYear, setResetYear] = useState<string>(() => {
+    return String(new Date().getFullYear());
+  });
   const [successToast, setSuccessToast] = useState<string | null>(null);
 
   useEffect(() => {
@@ -715,47 +727,139 @@ export default function App() {
   };
 
   const executeResetData = () => {
-    // Clear all codes to empty string "" (Not scheduled / Blank)
-    const clearedSchedules = departmentSchedules.map(deptSche => {
-      const updatedSchedules = deptSche.schedules.map(staffSche => {
-        const emptyCodes: Record<string, ScheduleCode> = {};
-        Object.keys(staffSche.schedule).forEach(dayKey => {
-          emptyCodes[dayKey] = ''; // Set every cell to blank
+    let clearedSchedules = [...departmentSchedules];
+    let toastMessage = '';
+
+    if (resetScope === 'ALL') {
+      // Clear all codes to empty string "" (Not scheduled / Blank)
+      clearedSchedules = departmentSchedules.map(deptSche => {
+        const updatedSchedules = deptSche.schedules.map(staffSche => {
+          const emptyCodes: Record<string, ScheduleCode> = {};
+          Object.keys(staffSche.schedule).forEach(dayKey => {
+            emptyCodes[dayKey] = ''; // Set every cell to blank
+          });
+          return {
+            ...staffSche,
+            schedule: emptyCodes
+          };
         });
+
         return {
-          ...staffSche,
-          schedule: emptyCodes
+          ...deptSche,
+          status: 'DRAFT' as const,
+          schedules: updatedSchedules,
+          feedback: undefined,
+          updatedAt: new Date().toISOString()
         };
       });
 
-      return {
-        ...deptSche,
-        status: 'DRAFT' as const,
-        schedules: updatedSchedules,
-        feedback: undefined,
-        updatedAt: new Date().toISOString()
-      };
-    });
+      // Delete deleteRequests and notifications in Firestore
+      deleteRequests.forEach(r => {
+        removeDeleteRequestFromFirestore(r.id).catch(err => console.error(err));
+      });
+
+      notifications.forEach(n => {
+        deleteNotificationFromFirestore(n.id).catch(err => console.error(err));
+      });
+      
+      // Clear custom symbols convention back to default values
+      localStorage.removeItem('song_thuong_convention_symbols_v1');
+      
+      toastMessage = 'Đã xóa sạch toàn bộ dữ liệu lịch làm việc! Tất cả các bảng đăng ký nhân lực hiện có trạng thái Trống để sẵn sàng xếp lịch mới.';
+    } else if (resetScope === 'YEAR') {
+      // Clear all codes of schedules in a specific year
+      clearedSchedules = departmentSchedules.map(deptSche => {
+        if (deptSche.month.startsWith(resetYear)) {
+          const updatedSchedules = deptSche.schedules.map(staffSche => {
+            const emptyCodes: Record<string, ScheduleCode> = {};
+            Object.keys(staffSche.schedule).forEach(dayKey => {
+              emptyCodes[dayKey] = '';
+            });
+            return {
+              ...staffSche,
+              schedule: emptyCodes
+            };
+          });
+
+          return {
+            ...deptSche,
+            status: 'DRAFT' as const,
+            schedules: updatedSchedules,
+            feedback: undefined,
+            updatedAt: new Date().toISOString()
+          };
+        }
+        return deptSche;
+      });
+
+      toastMessage = `Đã xóa sạch toàn bộ dữ liệu lịch làm việc của năm ${resetYear}!`;
+    } else if (resetScope === 'MONTH') {
+      // Clear all codes of schedules in a specific month
+      const formattedMonthStr = resetMonth; // e.g. "2026-07"
+      const [year, monthVal] = formattedMonthStr.split('-');
+      
+      clearedSchedules = departmentSchedules.map(deptSche => {
+        if (deptSche.month === formattedMonthStr) {
+          const updatedSchedules = deptSche.schedules.map(staffSche => {
+            const emptyCodes: Record<string, ScheduleCode> = {};
+            Object.keys(staffSche.schedule).forEach(dayKey => {
+              emptyCodes[dayKey] = '';
+            });
+            return {
+              ...staffSche,
+              schedule: emptyCodes
+            };
+          });
+
+          return {
+            ...deptSche,
+            status: 'DRAFT' as const,
+            schedules: updatedSchedules,
+            feedback: undefined,
+            updatedAt: new Date().toISOString()
+          };
+        }
+        return deptSche;
+      });
+
+      toastMessage = `Đã xóa sạch toàn bộ dữ liệu lịch làm việc của tháng ${monthVal}/${year}!`;
+    } else if (resetScope === 'DAY') {
+      // Clear a specific day in a specific month
+      const [year, monthVal, dayVal] = resetDate.split('-');
+      const targetMonthStr = `${year}-${monthVal}`; // e.g. "2026-07"
+      const targetDayKey = dayVal; // e.g. "03"
+
+      clearedSchedules = departmentSchedules.map(deptSche => {
+        if (deptSche.month === targetMonthStr) {
+          const updatedSchedules = deptSche.schedules.map(staffSche => {
+            const updatedCodes = { ...staffSche.schedule };
+            if (updatedCodes.hasOwnProperty(targetDayKey)) {
+              updatedCodes[targetDayKey] = '';
+            } else {
+              updatedCodes[targetDayKey] = '';
+            }
+            return {
+              ...staffSche,
+              schedule: updatedCodes
+            };
+          });
+
+          return {
+            ...deptSche,
+            schedules: updatedSchedules,
+            updatedAt: new Date().toISOString()
+          };
+        }
+        return deptSche;
+      });
+
+      toastMessage = `Đã xóa dữ liệu lịch làm việc của ngày ${dayVal}/${monthVal}/${year}!`;
+    }
 
     updateCachedSchedules(clearedSchedules);
-
-    // Delete deleteRequests and notifications in Firestore
-    deleteRequests.forEach(r => {
-      removeDeleteRequestFromFirestore(r.id).catch(err => console.error(err));
-    });
-
-    notifications.forEach(n => {
-      deleteNotificationFromFirestore(n.id).catch(err => console.error(err));
-    });
-    
-    // Clear custom symbols convention back to default values
-    localStorage.removeItem('song_thuong_convention_symbols_v1');
-    
     setAiReport(null);
     setIsResetConfirmOpen(false);
-    
-    // Show a beautiful in-app toast notification
-    setSuccessToast('Đã xóa sạch toàn bộ dữ liệu lịch làm việc! Tất cả các bảng đăng ký nhân lực hiện có trạng thái Trống để sẵn sàng xếp lịch mới.');
+    setSuccessToast(toastMessage);
   };
 
   // 6. Request Gemini dynamic Workforce Analysis
@@ -944,45 +1048,121 @@ export default function App() {
       {/* Custom Confirmation Modal for resetting data */}
       {isResetConfirmOpen && (
         <div id="reset-confirm-modal" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
-          <div className="bg-white rounded-xl shadow-2xl border border-gray-100 max-w-md w-full overflow-hidden transform transition-all">
+          <div className="bg-white rounded-xl shadow-2xl border border-gray-100 max-w-md w-full overflow-hidden transform transition-all animate-scale-up">
             {/* Header */}
             <div className="bg-rose-50 border-b border-rose-100 px-5 py-4 flex items-center gap-3">
               <div className="p-2 bg-rose-100 text-rose-600 rounded-lg">
                 <AlertTriangle className="w-5 h-5 animate-bounce" />
               </div>
               <div>
-                <h3 className="text-sm font-bold text-slate-800">Xóa toàn bộ dữ liệu?</h3>
+                <h3 className="text-sm font-bold text-slate-800">Cấu hình xóa dữ liệu</h3>
                 <p className="text-[10px] text-rose-600 font-medium font-mono">BỆNH VIỆN ĐA KHOA SÔNG THƯƠNG BẮC GIANG</p>
               </div>
             </div>
 
             {/* Content */}
-            <div className="p-5 space-y-3.5">
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Hành động này sẽ <strong className="text-rose-600">XÓA SẠCH toàn bộ thông tin xếp lịch hiện tại</strong> của tất cả các khoa phòng để bắt đầu đăng ký từ đầu:
-              </p>
-              
-              <ul className="text-[11px] text-slate-500 space-y-1.5 bg-slate-50 p-3 rounded-lg border border-slate-100 font-medium">
-                <li className="flex items-start gap-1.5">
-                  <span className="text-red-500 font-bold">•</span>
-                  <span>Đưa mọi ca làm việc, lịch làm việc của tất cả nhân sự về trạng thái Trống (ô trắng).</span>
-                </li>
-                <li className="flex items-start gap-1.5">
-                  <span className="text-red-500 font-bold">•</span>
-                  <span>Thiết lập trạng thái tất cả các khoa về trạng thái Bản Nháp (DRAFT).</span>
-                </li>
-                <li className="flex items-start gap-1.5">
-                  <span className="text-red-500 font-bold">•</span>
-                  <span>Gỡ bỏ các thông báo, phản hồi phê duyệt và yêu cầu nhân sự chưa xử lý.</span>
-                </li>
-                <li className="flex items-start gap-1.5">
-                  <span className="text-red-500 font-bold">•</span>
-                  <span>Giữ lại danh sách tên nhân viên để tránh tốn thời gian nhập lại họ tên.</span>
-                </li>
-              </ul>
+            <div className="p-5 space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-2">Chọn phạm vi thời gian cần xóa:</label>
+                <div className="grid grid-cols-4 gap-1 p-1 bg-slate-100 rounded-lg border border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => setResetScope('DAY')}
+                    className={`px-1 py-1.5 text-[11px] font-bold rounded-md transition-all cursor-pointer ${
+                      resetScope === 'DAY' ? 'bg-white text-slate-800 shadow-xs' : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    Ngày
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setResetScope('MONTH')}
+                    className={`px-1 py-1.5 text-[11px] font-bold rounded-md transition-all cursor-pointer ${
+                      resetScope === 'MONTH' ? 'bg-white text-slate-800 shadow-xs' : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    Tháng
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setResetScope('YEAR')}
+                    className={`px-1 py-1.5 text-[11px] font-bold rounded-md transition-all cursor-pointer ${
+                      resetScope === 'YEAR' ? 'bg-white text-slate-800 shadow-xs' : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    Năm
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setResetScope('ALL')}
+                    className={`px-1 py-1.5 text-[11px] font-bold rounded-md transition-all cursor-pointer ${
+                      resetScope === 'ALL' ? 'bg-white text-rose-700 shadow-xs' : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    Toàn bộ
+                  </button>
+                </div>
+              </div>
 
-              <p className="text-[11px] font-bold text-red-500 bg-red-50 p-2 rounded border border-red-100">
-                ⚠️ Cảnh báo cực kỳ quan trọng: Hành động này không thể phục hồi. Vui lòng cân nhắc kỹ lưỡng trước khi xác nhận!
+              {/* Dynamic input based on selection */}
+              {resetScope === 'DAY' && (
+                <div className="animate-fade-in space-y-1.5">
+                  <label className="block text-xs font-bold text-slate-700">Chọn ngày cụ thể cần xóa:</label>
+                  <input
+                    type="date"
+                    value={resetDate}
+                    onChange={(e) => setResetDate(e.target.value)}
+                    className="w-full px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-rose-500"
+                  />
+                  <p className="text-[10px] text-slate-400">Chỉ xóa dữ liệu phân ca của riêng ngày đã chọn.</p>
+                </div>
+              )}
+
+              {resetScope === 'MONTH' && (
+                <div className="animate-fade-in space-y-1.5">
+                  <label className="block text-xs font-bold text-slate-700">Chọn tháng cần xóa:</label>
+                  <input
+                    type="month"
+                    value={resetMonth}
+                    onChange={(e) => setResetMonth(e.target.value)}
+                    className="w-full px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-rose-500"
+                  />
+                  <p className="text-[10px] text-slate-400">Toàn bộ lịch làm việc của tháng này sẽ được đưa về trạng thái Bản nháp trống.</p>
+                </div>
+              )}
+
+              {resetScope === 'YEAR' && (
+                <div className="animate-fade-in space-y-1.5">
+                  <label className="block text-xs font-bold text-slate-700">Chọn năm cần xóa:</label>
+                  <select
+                    value={resetYear}
+                    onChange={(e) => setResetYear(e.target.value)}
+                    className="w-full px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-rose-500"
+                  >
+                    {[2024, 2025, 2026, 2027, 2028, 2029, 2030].map(y => (
+                      <option key={y} value={String(y)}>Năm {y}</option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-slate-400">Toàn bộ lịch làm việc của năm này sẽ được đưa về trạng thái Bản nháp trống.</p>
+                </div>
+              )}
+
+              {resetScope === 'ALL' && (
+                <div className="animate-fade-in bg-rose-50 p-3 rounded-lg border border-rose-100 space-y-1.5">
+                  <p className="text-xs text-rose-800 leading-relaxed font-semibold">
+                    Bạn đang chọn xóa TOÀN BỘ dữ liệu trên hệ thống:
+                  </p>
+                  <ul className="text-[11px] text-rose-700 space-y-1 pl-3 list-disc">
+                    <li>Đưa mọi ca làm việc của tất cả nhân sự về trạng thái Trống.</li>
+                    <li>Đưa tất cả bảng phân ca về trạng thái Bản Nháp.</li>
+                    <li>Gỡ bỏ tất cả các chỉ đạo, thông báo & phản hồi liên quan.</li>
+                    <li>Vẫn giữ nguyên danh sách cán bộ nhân sự để tái sử dụng.</li>
+                  </ul>
+                </div>
+              )}
+
+              <p className="text-[11px] font-bold text-red-500 bg-red-50 p-2.5 rounded-lg border border-red-100 leading-relaxed">
+                ⚠️ Cảnh báo: Hành động xóa dữ liệu này không thể hoàn tác. Vui lòng cân nhắc kỹ trước khi xác nhận!
               </p>
             </div>
 
@@ -1001,7 +1181,7 @@ export default function App() {
                 className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-lg shadow-sm hover:shadow-md transition-all cursor-pointer"
               >
                 <Trash className="w-3.5 h-3.5" />
-                <span>Đồng ý xóa sạch</span>
+                <span>Xác nhận xóa</span>
               </button>
             </div>
           </div>

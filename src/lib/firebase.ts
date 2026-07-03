@@ -35,6 +35,32 @@ const app = initializeApp(firebaseConfig);
 // Initialize Firestore with specific database ID
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId || '(default)');
 
+// Helper to sanitize undefined values recursively for Firestore compatibility
+function sanitizeForFirestore(obj: any): any {
+  if (obj === undefined) {
+    return null;
+  }
+  if (obj === null) {
+    return null;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(sanitizeForFirestore);
+  }
+  if (typeof obj === 'object') {
+    const clean: any = {};
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        const val = obj[key];
+        if (val !== undefined) {
+          clean[key] = sanitizeForFirestore(val);
+        }
+      }
+    }
+    return clean;
+  }
+  return obj;
+}
+
 // Helper to seed initial data if Firestore is empty
 export async function seedInitialDataIfEmpty() {
   try {
@@ -47,7 +73,7 @@ export async function seedInitialDataIfEmpty() {
         // Use document ID format: "month_department"
         const docId = `${schedule.month}_${schedule.department.replace(/\//g, '-')}`;
         const ref = doc(db, 'schedules', docId);
-        batch.set(ref, schedule);
+        batch.set(ref, sanitizeForFirestore(schedule));
       });
       await batch.commit();
     }
@@ -58,7 +84,7 @@ export async function seedInitialDataIfEmpty() {
       const batch = writeBatch(db);
       Object.entries(INITIAL_STAFF).forEach(([dept, staffs]) => {
         const ref = doc(db, 'staff', dept.replace(/\//g, '-'));
-        batch.set(ref, { department: dept, list: staffs });
+        batch.set(ref, sanitizeForFirestore({ department: dept, list: staffs }));
       });
       await batch.commit();
     }
@@ -103,7 +129,7 @@ export async function seedInitialDataIfEmpty() {
       const batch = writeBatch(db);
       defaultNotifs.forEach(notif => {
         const ref = doc(db, 'notifications', notif.id);
-        batch.set(ref, notif);
+        batch.set(ref, sanitizeForFirestore(notif));
       });
       await batch.commit();
     }
@@ -156,7 +182,7 @@ export async function seedInitialDataIfEmpty() {
       const batch = writeBatch(db);
       defaultDirectives.forEach(dir => {
         const ref = doc(db, 'directives', dir.id);
-        batch.set(ref, dir);
+        batch.set(ref, sanitizeForFirestore(dir));
       });
       await batch.commit();
     }
@@ -205,7 +231,7 @@ export async function seedInitialDataIfEmpty() {
       const batch = writeBatch(db);
       defaultMessages.forEach(msg => {
         const ref = doc(db, 'chat', msg.id);
-        batch.set(ref, msg);
+        batch.set(ref, sanitizeForFirestore(msg));
       });
       await batch.commit();
     }
@@ -224,7 +250,7 @@ export async function seedInitialDataIfEmpty() {
       const batch = writeBatch(db);
       Object.entries(defaultStatuses).forEach(([user, status]) => {
         const ref = doc(db, 'memberStatuses', user);
-        batch.set(ref, { username: user, status });
+        batch.set(ref, sanitizeForFirestore({ username: user, status }));
       });
       await batch.commit();
     }
@@ -250,7 +276,7 @@ export function subscribeToSchedules(onUpdate: (schedules: DepartmentSchedule[])
 
 export async function saveScheduleToFirestore(schedule: DepartmentSchedule) {
   const docId = `${schedule.month}_${schedule.department.replace(/\//g, '-')}`;
-  await setDoc(doc(db, 'schedules', docId), schedule);
+  await setDoc(doc(db, 'schedules', docId), sanitizeForFirestore(schedule));
 }
 
 // 2. Staff List Sync
@@ -271,7 +297,7 @@ export function subscribeToStaff(onUpdate: (staffMap: Record<string, Staff[]>) =
 
 export async function saveStaffToFirestore(department: string, list: Staff[]) {
   const docId = department.replace(/\//g, '-');
-  await setDoc(doc(db, 'staff', docId), { department, list });
+  await setDoc(doc(db, 'staff', docId), sanitizeForFirestore({ department, list }));
 }
 
 // 3. Notifications Sync
@@ -290,7 +316,7 @@ export function subscribeToNotifications(onUpdate: (notifications: AppNotificati
 }
 
 export async function addNotificationToFirestore(notif: AppNotification) {
-  await setDoc(doc(db, 'notifications', notif.id), notif);
+  await setDoc(doc(db, 'notifications', notif.id), sanitizeForFirestore(notif));
 }
 
 export async function markNotificationReadInFirestore(id: string) {
@@ -319,7 +345,7 @@ export function subscribeToDeleteRequests(onUpdate: (requests: DeleteRequest[]) 
 }
 
 export async function addDeleteRequestToFirestore(req: DeleteRequest) {
-  await setDoc(doc(db, 'deleteRequests', req.id), req);
+  await setDoc(doc(db, 'deleteRequests', req.id), sanitizeForFirestore(req));
 }
 
 export async function removeDeleteRequestFromFirestore(id: string) {
@@ -342,7 +368,7 @@ export function subscribeToDirectives(onUpdate: (directives: Directive[]) => voi
 }
 
 export async function addDirectiveToFirestore(dir: Directive) {
-  await setDoc(doc(db, 'directives', dir.id), dir);
+  await setDoc(doc(db, 'directives', dir.id), sanitizeForFirestore(dir));
 }
 
 export async function deleteDirectiveFromFirestore(id: string) {
@@ -355,7 +381,7 @@ export async function addDirectiveReplyToFirestore(directiveId: string, reply: D
   if (snap.exists()) {
     const dir = snap.data() as Directive;
     const updatedReplies = [...dir.replies, reply];
-    await updateDoc(ref, { replies: updatedReplies });
+    await updateDoc(ref, sanitizeForFirestore({ replies: updatedReplies }));
   }
 }
 
@@ -375,7 +401,7 @@ export function subscribeToChat(onUpdate: (messages: ChatMessage[]) => void) {
 }
 
 export async function addChatMessageToFirestore(msg: ChatMessage) {
-  await setDoc(doc(db, 'chat', msg.id), msg);
+  await setDoc(doc(db, 'chat', msg.id), sanitizeForFirestore(msg));
 }
 
 // 7. Member Statuses Sync
@@ -395,5 +421,5 @@ export function subscribeToMemberStatuses(onUpdate: (statuses: Record<string, st
 }
 
 export async function updateMemberStatusInFirestore(username: string, status: string) {
-  await setDoc(doc(db, 'memberStatuses', username), { username, status });
+  await setDoc(doc(db, 'memberStatuses', username), sanitizeForFirestore({ username, status }));
 }
