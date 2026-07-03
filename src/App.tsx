@@ -9,6 +9,20 @@ import Login from './components/Login';
 import PasswordModal from './components/PasswordModal';
 import CommunicationCenter from './components/CommunicationCenter';
 import { FileSpreadsheet, BarChart3, HelpCircle, CheckCircle, Clock, AlertTriangle, RefreshCw, X, Trash, MessageSquare } from 'lucide-react';
+import { 
+  seedInitialDataIfEmpty,
+  subscribeToSchedules, 
+  saveScheduleToFirestore,
+  subscribeToStaff, 
+  saveStaffToFirestore,
+  subscribeToNotifications, 
+  addNotificationToFirestore, 
+  markNotificationReadInFirestore,
+  subscribeToDeleteRequests, 
+  addDeleteRequestToFirestore, 
+  removeDeleteRequestFromFirestore,
+  deleteNotificationFromFirestore
+} from './lib/firebase';
 
 const LOCAL_STORAGE_KEY_SCHEDULES = 'song_thuong_dept_schedules_v1';
 const LOCAL_STORAGE_KEY_STAFT = 'song_thuong_staff_list_v1';
@@ -136,74 +150,60 @@ export default function App() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
 
-  // Load persistent configurations on mount
+  // Load persistent configurations on mount and setup real-time sync
   useEffect(() => {
-    const cachedSchedules = localStorage.getItem(LOCAL_STORAGE_KEY_SCHEDULES);
-    const cachedStaff = localStorage.getItem(LOCAL_STORAGE_KEY_STAFT);
-    const cachedNotifs = localStorage.getItem('song_thuong_notifications_v1');
+    let unsubSchedules: (() => void) | undefined;
+    let unsubStaff: (() => void) | undefined;
+    let unsubNotifications: (() => void) | undefined;
+    let unsubDeleteReqs: (() => void) | undefined;
 
-    if (cachedSchedules && cachedStaff) {
-      setDepartmentSchedules(JSON.parse(cachedSchedules));
-      setStaffList(JSON.parse(cachedStaff));
-    } else {
-      // Ininitialize default high fidelity mockup dataset
-      const defaultSchedules = getInitialDepartmentSchedules();
-      setDepartmentSchedules(defaultSchedules);
-      setStaffList(INITIAL_STAFF);
-      localStorage.setItem(LOCAL_STORAGE_KEY_SCHEDULES, JSON.stringify(defaultSchedules));
-      localStorage.setItem(LOCAL_STORAGE_KEY_STAFT, JSON.stringify(INITIAL_STAFF));
-    }
+    const init = async () => {
+      await seedInitialDataIfEmpty();
+      
+      unsubSchedules = subscribeToSchedules((schedules) => {
+        setDepartmentSchedules(schedules);
+      });
 
-    if (cachedNotifs) {
-      setNotifications(JSON.parse(cachedNotifs));
-    } else {
-      const today = new Date();
-      const currentMonthYear = `${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`;
-      const defaultNotifs: AppNotification[] = [
-        {
-          id: 'notif-1',
-          type: 'REMINDER',
-          title: 'Nhắc nhở nộp lịch làm việc',
-          message: `Lịch đăng ký tuần & tháng ${currentMonthYear} của Khoa Nội - Nhi đang ở trạng thái Bản Nháp. Hãy nộp trước đúng hạn.`,
-          timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-          isRead: false,
-          targetRole: 'CHIEF_NURSE',
-          targetDepartment: 'Nội - Nhi'
-        },
-        {
-          id: 'notif-2',
-          type: 'PENDING',
-          title: 'Lịch đăng ký mới chờ phê duyệt',
-          message: 'Khoa YHCT - PHCN đã nộp lịch đăng ký làm việc, đang chờ Trưởng phòng Điều dưỡng phê duyệt.',
-          timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-          isRead: false,
-          targetRole: 'HEAD_OF_NURSING'
-        },
-        {
-          id: 'notif-3',
-          type: 'APPROVED',
-          title: 'Lịch đăng ký đã được phê duyệt',
-          message: `Bảng xếp lịch tháng ${currentMonthYear} Khoa Ngoại đã được duyệt thành công.`,
-          timestamp: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
-          isRead: true,
-          targetRole: 'CHIEF_NURSE',
-          targetDepartment: 'Ngoại'
-        }
-      ];
-      setNotifications(defaultNotifs);
-      localStorage.setItem('song_thuong_notifications_v1', JSON.stringify(defaultNotifs));
-    }
+      unsubStaff = subscribeToStaff((staffMap) => {
+        setStaffList(staffMap);
+      });
+
+      unsubNotifications = subscribeToNotifications((notifs) => {
+        setNotifications(notifs);
+      });
+
+      unsubDeleteReqs = subscribeToDeleteRequests((reqs) => {
+        setDeleteRequests(reqs);
+      });
+    };
+
+    init().catch(err => console.error("Error initializing Firebase:", err));
+
+    return () => {
+      if (unsubSchedules) unsubSchedules();
+      if (unsubStaff) unsubStaff();
+      if (unsubNotifications) unsubNotifications();
+      if (unsubDeleteReqs) unsubDeleteReqs();
+    };
   }, []);
 
-  // Sync state helpers to persistent Storage
+  // Sync state helpers to persistent Storage & Firestore
   const updateCachedSchedules = (updated: DepartmentSchedule[]) => {
     setDepartmentSchedules(updated);
     localStorage.setItem(LOCAL_STORAGE_KEY_SCHEDULES, JSON.stringify(updated));
+    // Sync each schedule to Firestore
+    updated.forEach(schedule => {
+      saveScheduleToFirestore(schedule).catch(err => console.error("Error saving schedule to Firestore:", err));
+    });
   };
 
   const updateCachedStaff = (updated: Record<string, Staff[]>) => {
     setStaffList(updated);
     localStorage.setItem(LOCAL_STORAGE_KEY_STAFT, JSON.stringify(updated));
+    // Sync each department's staff list to Firestore
+    Object.entries(updated).forEach(([dept, list]) => {
+      saveStaffToFirestore(dept, list).catch(err => console.error("Error saving staff to Firestore:", err));
+    });
   };
 
   const addNotification = (
@@ -223,54 +223,42 @@ export default function App() {
       targetRole,
       targetDepartment
     };
-    setNotifications(prev => {
-      const updated = [newNotif, ...prev];
-      localStorage.setItem('song_thuong_notifications_v1', JSON.stringify(updated));
-      return updated;
-    });
+    addNotificationToFirestore(newNotif).catch(err => console.error("Error adding notification to Firestore:", err));
   };
 
   const handleMarkAsRead = (id: string) => {
-    setNotifications(prev => {
-      const updated = prev.map(n => n.id === id ? { ...n, isRead: true } : n);
-      localStorage.setItem('song_thuong_notifications_v1', JSON.stringify(updated));
-      return updated;
-    });
+    markNotificationReadInFirestore(id).catch(err => console.error("Error marking notification read:", err));
   };
 
   const handleMarkAllAsReadByRole = (role: Role, department?: Department) => {
-    setNotifications(prev => {
-      const updated = prev.map(n => {
-        let isTarget = false;
-        if (role === 'CHIEF_NURSE') {
-          isTarget = n.targetRole === 'CHIEF_NURSE' && (!n.targetDepartment || n.targetDepartment === department);
-        } else if (role === 'HEAD_OF_NURSING') {
-          isTarget = n.targetRole === 'HEAD_OF_NURSING';
-        } else {
-          isTarget = n.targetRole === 'ADMIN' || n.targetRole === 'CHIEF_NURSE' || n.targetRole === 'HEAD_OF_NURSING';
-        }
-        return isTarget ? { ...n, isRead: true } : n;
-      });
-      localStorage.setItem('song_thuong_notifications_v1', JSON.stringify(updated));
-      return updated;
+    notifications.forEach(n => {
+      let isTarget = false;
+      if (role === 'CHIEF_NURSE') {
+        isTarget = n.targetRole === 'CHIEF_NURSE' && (!n.targetDepartment || n.targetDepartment === department);
+      } else if (role === 'HEAD_OF_NURSING') {
+        isTarget = n.targetRole === 'HEAD_OF_NURSING';
+      } else {
+        isTarget = n.targetRole === 'ADMIN' || n.targetRole === 'CHIEF_NURSE' || n.targetRole === 'HEAD_OF_NURSING';
+      }
+      if (isTarget && !n.isRead) {
+        markNotificationReadInFirestore(n.id).catch(err => console.error("Error marking notification read:", err));
+      }
     });
   };
 
   const handleClearNotificationsByRole = (role: Role, department?: Department) => {
-    setNotifications(prev => {
-      const updated = prev.filter(n => {
-        let isTarget = false;
-        if (role === 'CHIEF_NURSE') {
-          isTarget = n.targetRole === 'CHIEF_NURSE' && (!n.targetDepartment || n.targetDepartment === department);
-        } else if (role === 'HEAD_OF_NURSING') {
-          isTarget = n.targetRole === 'HEAD_OF_NURSING';
-        } else {
-          isTarget = n.targetRole === 'ADMIN' || n.targetRole === 'CHIEF_NURSE' || n.targetRole === 'HEAD_OF_NURSING';
-        }
-        return !isTarget;
-      });
-      localStorage.setItem('song_thuong_notifications_v1', JSON.stringify(updated));
-      return updated;
+    notifications.forEach(n => {
+      let isTarget = false;
+      if (role === 'CHIEF_NURSE') {
+        isTarget = n.targetRole === 'CHIEF_NURSE' && (!n.targetDepartment || n.targetDepartment === department);
+      } else if (role === 'HEAD_OF_NURSING') {
+        isTarget = n.targetRole === 'HEAD_OF_NURSING';
+      } else {
+        isTarget = n.targetRole === 'ADMIN' || n.targetRole === 'CHIEF_NURSE' || n.targetRole === 'HEAD_OF_NURSING';
+      }
+      if (isTarget) {
+        deleteNotificationFromFirestore(n.id).catch(err => console.error("Error deleting notification:", err));
+      }
     });
   };
 
@@ -470,10 +458,12 @@ export default function App() {
     });
     updateCachedSchedules(updatedSchedules);
 
-    // Filter out any active or pending delete requests for this staff
-    const updatedRequests = deleteRequests.filter(r => r.staffId !== staffId);
-    setDeleteRequests(updatedRequests);
-    localStorage.setItem('song_thuong_delete_requests_v1', JSON.stringify(updatedRequests));
+    // Filter out any active or pending delete requests for this staff in Firestore
+    deleteRequests.forEach(r => {
+      if (r.staffId === staffId) {
+        removeDeleteRequestFromFirestore(r.id).catch(err => console.error("Error removing delete request from Firestore:", err));
+      }
+    });
   };
 
   // 3.1. Update existing staff member info (or transfer department if newDept is provided and different)
@@ -598,9 +588,7 @@ export default function App() {
       status: 'PENDING'
     };
 
-    const updated = [newRequest, ...deleteRequests];
-    setDeleteRequests(updated);
-    localStorage.setItem('song_thuong_delete_requests_v1', JSON.stringify(updated));
+    addDeleteRequestToFirestore(newRequest).catch(err => console.error("Error adding delete request to Firestore:", err));
 
     addNotification(
       'PENDING',
@@ -618,10 +606,12 @@ export default function App() {
     // Filter staff out of listing and update rosters
     handleRemoveStaff(request.department, request.staffId);
 
-    // Update the request status
-    const updated = deleteRequests.map(r => r.id === requestId ? { ...r, status: 'APPROVED' as const } : r);
-    setDeleteRequests(updated);
-    localStorage.setItem('song_thuong_delete_requests_v1', JSON.stringify(updated));
+    // Update request status to APPROVED in Firestore
+    const updatedRequest: DeleteRequest = {
+      ...request,
+      status: 'APPROVED'
+    };
+    addDeleteRequestToFirestore(updatedRequest).catch(err => console.error("Error updating delete request in Firestore:", err));
 
     addNotification(
       'APPROVED',
@@ -637,10 +627,12 @@ export default function App() {
     const request = deleteRequests.find(r => r.id === requestId);
     if (!request) return;
 
-    // Update request status to REJECTED
-    const updated = deleteRequests.map(r => r.id === requestId ? { ...r, status: 'REJECTED' as const } : r);
-    setDeleteRequests(updated);
-    localStorage.setItem('song_thuong_delete_requests_v1', JSON.stringify(updated));
+    // Update request status to REJECTED in Firestore
+    const updatedRequest: DeleteRequest = {
+      ...request,
+      status: 'REJECTED'
+    };
+    addDeleteRequestToFirestore(updatedRequest).catch(err => console.error("Error updating delete request in Firestore:", err));
 
     addNotification(
       'REJECTED',
@@ -745,14 +737,16 @@ export default function App() {
       };
     });
 
-    setDepartmentSchedules(clearedSchedules);
-    setDeleteRequests([]);
-    setNotifications([]);
+    updateCachedSchedules(clearedSchedules);
 
-    // Save to localStorage
-    localStorage.setItem(LOCAL_STORAGE_KEY_SCHEDULES, JSON.stringify(clearedSchedules));
-    localStorage.setItem('song_thuong_delete_requests_v1', JSON.stringify([]));
-    localStorage.setItem('song_thuong_notifications_v1', JSON.stringify([]));
+    // Delete deleteRequests and notifications in Firestore
+    deleteRequests.forEach(r => {
+      removeDeleteRequestFromFirestore(r.id).catch(err => console.error(err));
+    });
+
+    notifications.forEach(n => {
+      deleteNotificationFromFirestore(n.id).catch(err => console.error(err));
+    });
     
     // Clear custom symbols convention back to default values
     localStorage.removeItem('song_thuong_convention_symbols_v1');

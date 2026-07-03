@@ -1,6 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AuthUser, Role, Department, Directive, DirectiveReply, ChatMessage } from '../types';
 import { 
+  subscribeToDirectives,
+  addDirectiveToFirestore,
+  deleteDirectiveFromFirestore,
+  addDirectiveReplyToFirestore,
+  subscribeToChat,
+  addChatMessageToFirestore,
+  subscribeToMemberStatuses,
+  updateMemberStatusInFirestore,
+  addNotificationToFirestore
+} from '../lib/firebase';
+import { 
   MessageSquare, 
   Send, 
   Users, 
@@ -63,6 +74,7 @@ const CLINICAL_STATUSES = [
   { label: '🟢 Đang trực ban', color: 'bg-emerald-500 text-emerald-800' },
   { label: '🟡 Đang đi buồng bệnh', color: 'bg-amber-500 text-amber-800' },
   { label: '🔴 Trong phòng mổ / Giao ban', color: 'bg-rose-500 text-rose-800' },
+  { label: '🏖️ Đang nghỉ phép / Nghỉ bù', color: 'bg-sky-500 text-sky-800' },
   { label: '⚪ Ngoại tuyến (Nghỉ ca)', color: 'bg-slate-400 text-slate-700' }
 ];
 
@@ -185,164 +197,44 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
     }
   };
 
-  // Load directives and chat messages from LocalStorage
-  const loadData = () => {
-    // Load Directives
-    const cachedDirectives = localStorage.getItem('song_thuong_directives_v1');
-    if (cachedDirectives) {
-      try {
-        setDirectives(JSON.parse(cachedDirectives));
-      } catch (e) {
-        setDirectives([]);
-      }
-    } else {
-      // Default initial seed directives
-      const defaultDirectives: Directive[] = [
-        {
-          id: 'dir-1',
-          title: 'Triển khai lịch trực tăng cường dịp cuối tuần và phòng chống bão lũ',
-          content: 'Đề nghị Điều dưỡng trưởng tất cả các khoa kiểm tra quân số, đảm bảo trực 24/24. Báo cáo tình hình chuẩn bị vật tư y tế khẩn cấp trước 17h00 chiều nay.',
-          senderName: 'Nguyễn Thanh Hương',
-          senderUsername: 'phongdieuduong',
-          recipient: 'ALL',
-          priority: 'URGENT',
-          timestamp: new Date(Date.now() - 3600000 * 4).toISOString(), // 4h ago
-          isOpinionRequest: false,
-          replies: [
-            {
-              id: 'reply-1',
-              senderName: 'Trương Thị Ngân',
-              senderUsername: 'ngoai',
-              content: 'Khoa Ngoại đã rà soát và hoàn tất danh sách điều dưỡng ứng trực khẩn cấp. Sẵn sàng vật tư cấp cứu.',
-              timestamp: new Date(Date.now() - 3600000 * 3).toISOString()
-            }
-          ]
-        },
-        {
-          id: 'dir-2',
-          title: 'Xin ý kiến chỉ đạo: Sắp xếp điều dưỡng đi học chuyên đề Hồi sức cấp cứu',
-          content: 'Khoa Nội - Nhi hiện tại đang thiếu nhân sự do có 1 điều dưỡng nghỉ thai sản. Đề xuất xin ý kiến Trưởng phòng điều phối thêm 1 nhân viên từ khoa khác hỗ trợ trong thời gian điều dưỡng đi học.',
-          senderName: 'Phạm Thị Cánh',
-          senderUsername: 'noinhi',
-          recipient: 'ALL',
-          priority: 'NORMAL',
-          timestamp: new Date(Date.now() - 3600000 * 8).toISOString(),
-          isOpinionRequest: true,
-          replies: [
-            {
-              id: 'reply-2',
-              senderName: 'Nguyễn Thanh Hương',
-              senderUsername: 'phongdieuduong',
-              content: 'Phòng Điều dưỡng đã ghi nhận. Sẽ xem xét điều chuyển tạm thời 1 nhân sự từ LCK hoặc Ngoại sang hỗ trợ từ tuần tới.',
-              timestamp: new Date(Date.now() - 3600000 * 6).toISOString()
-            }
-          ]
-        }
-      ];
-      localStorage.setItem('song_thuong_directives_v1', JSON.stringify(defaultDirectives));
-      setDirectives(defaultDirectives);
-    }
-
-    // Load Chat
-    const cachedChat = localStorage.getItem('song_thuong_chat_messages_v1');
-    if (cachedChat) {
-      try {
-        setChatMessages(JSON.parse(cachedChat));
-      } catch (e) {
-        setChatMessages([]);
-      }
-    } else {
-      const defaultMessages: ChatMessage[] = [
-        {
-          id: 'msg-1',
-          senderUsername: 'phongdieuduong',
-          senderName: 'Nguyễn Thanh Hương',
-          senderRole: 'HEAD_OF_NURSING',
-          recipientUsername: 'all',
-          content: 'Xin chào toàn thể các anh chị em Điều dưỡng trưởng các khoa! Kênh chat chung toàn viện bắt đầu hoạt động.',
-          timestamp: new Date(Date.now() - 3600000 * 24).toISOString() // 24h ago
-        },
-        {
-          id: 'msg-2',
-          senderUsername: 'noinhi',
-          senderName: 'Phạm Thị Cánh',
-          senderRole: 'CHIEF_NURSE',
-          recipientUsername: 'all',
-          content: 'Khoa Nội - Nhi xin chào Trưởng phòng và các đồng nghiệp ạ!',
-          timestamp: new Date(Date.now() - 3600000 * 23.5).toISOString()
-        },
-        {
-          id: 'msg-3',
-          senderUsername: 'ngoai',
-          senderName: 'Trương Thị Ngân',
-          senderRole: 'CHIEF_NURSE',
-          recipientUsername: 'all',
-          content: 'Khoa Ngoại điểm danh đầy đủ!',
-          timestamp: new Date(Date.now() - 3600000 * 23).toISOString()
-        },
-        {
-          id: 'msg-4',
-          senderUsername: 'phongdieuduong',
-          senderName: 'Nguyễn Thanh Hương',
-          senderRole: 'HEAD_OF_NURSING',
-          recipientUsername: 'leadership',
-          content: 'Chào các bạn, đây là kênh mật dành riêng cho Phòng điều dưỡng bàn bạc kế hoạch trực chỉ đạo.',
-          timestamp: new Date(Date.now() - 3600000 * 12).toISOString()
-        }
-      ];
-      localStorage.setItem('song_thuong_chat_messages_v1', JSON.stringify(defaultMessages));
-      setChatMessages(defaultMessages);
-    }
-
-    // Load member statuses
-    const cachedStatuses = localStorage.getItem('song_thuong_member_statuses_v1');
-    if (cachedStatuses) {
-      try {
-        setMemberStatuses(JSON.parse(cachedStatuses));
-      } catch (e) {}
-    }
-  };
+  // Set up refs to ignore sound on first loading
+  const initialDirectivesLoaded = useRef(false);
+  const initialChatLoaded = useRef(false);
 
   useEffect(() => {
     loadAccountNames();
-    loadData();
 
-    // Listen to storage event to enable REAL-TIME sync across multiple tabs/windows!
-    const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === 'song_thuong_directives_v1' || e.key === 'song_thuong_chat_messages_v1') {
-        loadData();
+    const unsubDirectives = subscribeToDirectives((dirs) => {
+      setDirectives(dirs);
+      if (initialDirectivesLoaded.current) {
         playNotificationSound();
+      } else {
+        initialDirectivesLoaded.current = true;
       }
-      if (e.key === 'song_thuong_account_names_v3') {
-        loadAccountNames();
-      }
-      if (e.key === 'song_thuong_member_statuses_v1') {
-        const cached = localStorage.getItem('song_thuong_member_statuses_v1');
-        if (cached) {
-          try {
-            const parsed = JSON.parse(cached);
-            setMemberStatuses(parsed);
-            if (parsed[currentUser.username]) {
-              setMyStatus(parsed[currentUser.username]);
-            }
-          } catch (err) {}
-        }
-      }
-    };
+    });
 
-    window.addEventListener('storage', handleStorageChange);
+    const unsubChat = subscribeToChat((messages) => {
+      setChatMessages(messages);
+      if (initialChatLoaded.current) {
+        playNotificationSound();
+      } else {
+        initialChatLoaded.current = true;
+      }
+    });
 
-    // Regular interval fallback to ensure real-time response even without multi-window changes
-    const interval = setInterval(() => {
-      loadData();
-      loadAccountNames();
-    }, 2500);
+    const unsubStatuses = subscribeToMemberStatuses((statuses) => {
+      setMemberStatuses(statuses);
+      if (statuses[currentUser.username]) {
+        setMyStatus(statuses[currentUser.username]);
+      }
+    });
 
     return () => {
-      window.removeEventListener('storage', handleStorageChange);
-      clearInterval(interval);
+      unsubDirectives();
+      unsubChat();
+      unsubStatuses();
     };
-  }, [isMuted]);
+  }, [isMuted, currentUser.username]);
 
   // Scroll to bottom of chat when room or message count changes
   useEffect(() => {
@@ -355,10 +247,7 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
   // Handle changing user's own status
   const handleMyStatusChange = (status: string) => {
     setMyStatus(status);
-    const updated = { ...memberStatuses, [currentUser.username]: status };
-    setMemberStatuses(updated);
-    localStorage.setItem('song_thuong_member_statuses_v1', JSON.stringify(updated));
-    window.dispatchEvent(new Event('storage'));
+    updateMemberStatusInFirestore(currentUser.username, status).catch(err => console.error("Error updating member status in Firestore:", err));
   };
 
   // Handle adding a directive or asking for advice
@@ -384,38 +273,26 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
       replies: []
     };
 
-    const updated = [newDirective, ...directives];
-    setDirectives(updated);
-    localStorage.setItem('song_thuong_directives_v1', JSON.stringify(updated));
+    addDirectiveToFirestore(newDirective).catch(err => console.error("Error adding directive to Firestore:", err));
 
-    // Also trigger a system notification so others get alert
-    const cachedNotifs = localStorage.getItem('song_thuong_notifications_v1') || '[]';
-    try {
-      const notifs = JSON.parse(cachedNotifs);
-      notifs.unshift({
-        id: `notif-${Date.now()}`,
-        type: isOpinion ? 'PENDING' : 'CHANGE',
-        title: isOpinion ? 'Yêu cầu ý kiến chỉ đạo mới' : 'Chỉ đạo từ Phòng Điều dưỡng',
-        message: `${currentUser.fullName}: "${directiveTitle.trim().substring(0, 45)}..."`,
-        timestamp: new Date().toISOString(),
-        isRead: false,
-        targetRole: isOpinion ? 'HEAD_OF_NURSING' : 'CHIEF_NURSE',
-        targetDepartment: isOpinion ? currentUser.department : undefined
-      });
-      localStorage.setItem('song_thuong_notifications_v1', JSON.stringify(notifs));
-      
-      // Dispatch storage event manually for same-page listeners
-      window.dispatchEvent(new Event('storage'));
-    } catch (e) {
-      console.error(e);
-    }
+    // Also trigger a system notification in Firestore so others get alert
+    const newNotif = {
+      id: `notif-${Date.now()}`,
+      type: isOpinion ? ('PENDING' as const) : ('CHANGE' as const),
+      title: isOpinion ? 'Yêu cầu ý kiến chỉ đạo mới' : 'Chỉ đạo từ Phòng Điều dưỡng',
+      message: `${currentUser.fullName}: "${directiveTitle.trim().substring(0, 45)}..."`,
+      timestamp: new Date().toISOString(),
+      isRead: false,
+      targetRole: isOpinion ? ('HEAD_OF_NURSING' as const) : ('CHIEF_NURSE' as const),
+      targetDepartment: isOpinion ? currentUser.department : undefined
+    };
+    addNotificationToFirestore(newNotif).catch(err => console.error("Error creating notification in Firestore:", err));
 
     // Reset Form
     setDirectiveTitle('');
     setDirectiveContent('');
     setDirectivePriority('NORMAL');
     setShowAddDirectiveForm(false);
-    playNotificationSound();
   };
 
   // Handle sending a reply in directive thread
@@ -423,29 +300,16 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
     const replyText = directiveReplyTexts[directiveId] || '';
     if (!replyText.trim()) return;
 
-    const updated = directives.map(dir => {
-      if (dir.id === directiveId) {
-        const newReply: DirectiveReply = {
-          id: `reply-${Date.now()}`,
-          senderName: currentUser.fullName,
-          senderUsername: currentUser.username,
-          content: replyText.trim(),
-          timestamp: new Date().toISOString()
-        };
-        return {
-          ...dir,
-          replies: [...dir.replies, newReply]
-        };
-      }
-      return dir;
-    });
+    const newReply: DirectiveReply = {
+      id: `reply-${Date.now()}`,
+      senderName: currentUser.fullName,
+      senderUsername: currentUser.username,
+      content: replyText.trim(),
+      timestamp: new Date().toISOString()
+    };
 
-    setDirectives(updated);
-    localStorage.setItem('song_thuong_directives_v1', JSON.stringify(updated));
+    addDirectiveReplyToFirestore(directiveId, newReply).catch(err => console.error("Error adding directive reply in Firestore:", err));
     setDirectiveReplyTexts(prev => ({ ...prev, [directiveId]: '' }));
-
-    // Send storage event
-    window.dispatchEvent(new Event('storage'));
   };
 
   // Handle sending a chat message (text or attachment)
@@ -470,24 +334,15 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
       })
     };
 
-    const updated = [...chatMessages, newMsg];
-    setChatMessages(updated);
-    localStorage.setItem('song_thuong_chat_messages_v1', JSON.stringify(updated));
+    addChatMessageToFirestore(newMsg).catch(err => console.error("Error saving chat message to Firestore:", err));
     setTypedMessage('');
     setShowAttachmentDropdown(false);
-
-    // Trigger storage event manually
-    window.dispatchEvent(new Event('storage'));
-    playNotificationSound();
   };
 
   // Clear directive
   const handleDeleteDirective = (id: string) => {
     if (!window.confirm('Bạn có chắc chắn muốn xóa văn bản chỉ đạo này không?')) return;
-    const updated = directives.filter(d => d.id !== id);
-    setDirectives(updated);
-    localStorage.setItem('song_thuong_directives_v1', JSON.stringify(updated));
-    window.dispatchEvent(new Event('storage'));
+    deleteDirectiveFromFirestore(id).catch(err => console.error("Error deleting directive in Firestore:", err));
   };
 
   // Filter messages for active room
