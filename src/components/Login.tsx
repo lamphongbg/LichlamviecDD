@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Lock, Building, ShieldCheck, AlertCircle, Eye, EyeOff, Activity, ChevronDown } from 'lucide-react';
-import { Role, Department, AuthUser } from '../types';
+import { Lock, Building, ShieldCheck, AlertCircle, Eye, EyeOff, Activity, ChevronDown, User } from 'lucide-react';
+import { Role, Department, AuthUser, Staff } from '../types';
+import { INITIAL_STAFF } from '../initialData';
 
 interface LoginProps {
   onLoginSuccess: (user: AuthUser) => void;
 }
 
-type LoginOption = 'noinhi' | 'ngoai' | 'yhct' | 'lck' | 'admin' | 'phongdieuduong';
+type LoginOption = 'noinhi' | 'ngoai' | 'yhct' | 'lck' | 'admin' | 'phongdieuduong' | 'staff';
 
 export default function Login({ onLoginSuccess }: LoginProps) {
   const [selectedOption, setSelectedOption] = useState<LoginOption>('noinhi');
@@ -15,13 +16,30 @@ export default function Login({ onLoginSuccess }: LoginProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+
+  // Staff Selection States
+  const [staffDept, setStaffDept] = useState<string>('Nội - Nhi');
+  const [selectedStaffId, setSelectedStaffId] = useState<string>('');
+
+  // Load staff list from localstorage or fallback to INITIAL_STAFF
+  const [staffList, setStaffList] = useState<Record<string, Staff[]>>(() => {
+    try {
+      const cached = localStorage.getItem('song_thuong_staff_list_v1');
+      if (cached) return JSON.parse(cached);
+    } catch (e) {
+      console.error(e);
+    }
+    return INITIAL_STAFF;
+  });
+
   const [storedPasswords, setStoredPasswords] = useState<Record<LoginOption, string>>({
     admin: '',
     phongdieuduong: '',
     noinhi: '',
     ngoai: '',
     yhct: '',
-    lck: ''
+    lck: '',
+    staff: ''
   });
 
   // Load latest passwords from localStorage
@@ -37,7 +55,8 @@ export default function Login({ onLoginSuccess }: LoginProps) {
           noinhi: parsed.noinhi ?? '',
           ngoai: parsed.ngoai ?? '',
           yhct: parsed.yhct ?? '',
-          lck: parsed.lck ?? ''
+          lck: parsed.lck ?? '',
+          staff: ''
         };
         setStoredPasswords(updated);
       } catch (e) {
@@ -50,12 +69,23 @@ export default function Login({ onLoginSuccess }: LoginProps) {
         noinhi: '',
         ngoai: '',
         yhct: '',
-        lck: ''
+        lck: '',
+        staff: ''
       };
       localStorage.setItem('song_thuong_auth_passwords_v3', JSON.stringify(defaults));
       setStoredPasswords(defaults);
     }
   }, []);
+
+  // Update selected staff id when department changes
+  useEffect(() => {
+    const list = staffList[staffDept] || [];
+    if (list.length > 0) {
+      setSelectedStaffId(list[0].id);
+    } else {
+      setSelectedStaffId('');
+    }
+  }, [staffDept, staffList]);
 
   // List of authorized divisions/departments for selection
   const loginOptions = [
@@ -65,12 +95,37 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     { value: 'lck' as LoginOption, label: 'Liên Chuyên Khoa (Điều dưỡng Trưởng)', role: 'CHIEF_NURSE' as Role, dept: 'LCK' as Department },
     { value: 'phongdieuduong' as LoginOption, label: 'Phòng Điều dưỡng (Trưởng phòng)', role: 'HEAD_OF_NURSING' as Role, dept: undefined },
     { value: 'admin' as LoginOption, label: 'Tài khoản Admin (Hệ thống)', role: 'ADMIN' as Role, dept: undefined },
+    { value: 'staff' as LoginOption, label: 'Tra cứu lịch cá nhân (Nhân viên y tế)', role: 'STAFF' as Role, dept: undefined },
   ];
 
   // Handle local form submission
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (selectedOption === 'staff') {
+      if (!selectedStaffId) {
+        setError('Vui lòng chọn nhân viên y tế cần tra cứu.');
+        return;
+      }
+      setIsLoading(true);
+      setTimeout(() => {
+        const list = staffList[staffDept] || [];
+        const staffObj = list.find(s => s.id === selectedStaffId);
+        if (staffObj) {
+          onLoginSuccess({
+            username: staffObj.id,
+            role: 'STAFF',
+            department: staffDept,
+            fullName: staffObj.name
+          });
+        } else {
+          setError('Không tìm thấy nhân viên đã chọn.');
+        }
+        setIsLoading(false);
+      }, 400);
+      return;
+    }
 
     // Dynamic password lookup (default is empty string now)
     const expectedPassword = storedPasswords[selectedOption] ?? '';
@@ -156,19 +211,21 @@ export default function Login({ onLoginSuccess }: LoginProps) {
   };
 
   const getPasswordStatusText = (option: LoginOption) => {
+    if (option === 'staff') return "Tra cứu tự do";
     const rawPass = storedPasswords[option];
     if (rawPass === "" || rawPass === undefined) return "Không mật khẩu (Đăng nhập trực tiếp)";
     return "Đã thiết lập khóa bảo mật";
   };
 
-  const isCurrentPasswordless = (storedPasswords[selectedOption] ?? '') === '';
+  const isCurrentPasswordless = selectedOption === 'staff' || (storedPasswords[selectedOption] ?? '') === '';
 
   return (
-    <div id="login-container" className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4 relative overflow-hidden">
+    <div id="login-container" className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center p-4 relative overflow-hidden">
       
       {/* Visual background atmospheric elements */}
-      <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] bg-blue-500/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] bg-emerald-500/5 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] bg-blue-600/10 rounded-full blur-[140px] pointer-events-none animate-pulse duration-[8000ms]" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[70%] h-[70%] bg-indigo-500/10 rounded-full blur-[140px] pointer-events-none animate-pulse duration-[12000ms]" />
+      <div className="absolute top-[40%] left-[35%] w-[30%] h-[30%] bg-emerald-500/5 rounded-full blur-[120px] pointer-events-none" />
 
       {/* Main card */}
       <motion.div
@@ -176,18 +233,18 @@ export default function Login({ onLoginSuccess }: LoginProps) {
         initial={{ opacity: 0, y: 30 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.6, ease: 'easeOut' }}
-        className="w-full max-w-md bg-slate-800/90 border border-slate-700/80 rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur-md relative z-10"
+        className="w-full max-w-md bg-slate-900/40 border border-white/[0.08] rounded-2xl p-6 sm:p-8 shadow-[0_8px_32px_rgba(0,0,0,0.5)] backdrop-blur-xl relative z-10"
       >
         {/* Portal Header */}
         <div className="flex flex-col items-center text-center mb-6">
-          <div className="w-14 h-14 bg-gradient-to-tr from-blue-600 to-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-xl shadow-blue-500/10 mb-4">
+          <div className="w-14 h-14 bg-gradient-to-tr from-blue-600 via-indigo-600 to-violet-600 rounded-2xl flex items-center justify-center text-white shadow-[0_4px_20px_rgba(59,130,246,0.3)] mb-4 animate-bounce duration-[3000ms]">
             <Activity className="w-7 h-7" />
           </div>
-          <span className="text-[10px] font-extrabold uppercase tracking-widest bg-blue-500/10 text-blue-400 px-3 py-1 rounded-full border border-blue-500/20 mb-2">
+          <span className="text-[10px] font-black uppercase tracking-widest bg-blue-500/10 text-blue-400 px-3 py-1 rounded-full border border-blue-500/20 mb-2">
             BỆNH VIỆN ĐA KHOA SÔNG THƯƠNG
           </span>
-          <h2 className="text-xl font-extrabold text-white tracking-tight">CỔNG ỦY QUYỀN SỐ HÓA</h2>
-          <p className="text-xs text-slate-400 mt-1">Hệ Thống Phân Công Lịch Trực & Thẩm Định Nhân Lực Điều Dưỡng</p>
+          <h2 className="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-white via-slate-100 to-slate-400 tracking-wider">CỔNG ỦY QUYỀN SỐ HÓA</h2>
+          <p className="text-[11px] text-slate-400 mt-1 font-medium">Hệ Thống Phân Công Lịch Trực & Thẩm Định Nhân Lực Điều Dưỡng</p>
         </div>
 
         {/* Action Form */}
@@ -208,7 +265,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                   setError(null);
                   setPassword(''); // Clear fields on change
                 }}
-                className="w-full pl-3 pr-10 py-3 bg-slate-900 border border-slate-700 hover:border-slate-600 rounded-xl text-sm font-bold text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 transition-all cursor-pointer appearance-none"
+                className="w-full pl-3 pr-10 py-3 bg-slate-950/80 border border-white/[0.08] hover:border-slate-600 rounded-xl text-sm font-bold text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 focus:shadow-[0_0_15px_rgba(59,130,246,0.2)] transition-all cursor-pointer appearance-none"
               >
                 {loginOptions.map((opt) => (
                   <option key={opt.value} value={opt.value} className="bg-slate-900 text-white py-2">
@@ -222,56 +279,122 @@ export default function Login({ onLoginSuccess }: LoginProps) {
             </div>
           </div>
 
+          {selectedOption === 'staff' && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              className="space-y-4 pt-1"
+            >
+              {/* Staff Department Selection */}
+              <div className="space-y-1.5">
+                <label htmlFor="staff-dept-select" className="block text-xs font-bold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+                  <Building className="w-3.5 h-3.5 text-blue-400" />
+                  Chọn Khoa / Phòng làm việc
+                </label>
+                <div className="relative">
+                  <select
+                    id="staff-dept-select"
+                    value={staffDept}
+                    onChange={(e) => {
+                      setStaffDept(e.target.value);
+                      setError(null);
+                    }}
+                    className="w-full pl-3 pr-10 py-3 bg-slate-950/80 border border-white/[0.08] hover:border-slate-600 rounded-xl text-sm font-bold text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 focus:shadow-[0_0_15px_rgba(59,130,246,0.2)] transition-all cursor-pointer appearance-none"
+                  >
+                    {Object.keys(staffList).map((dept) => (
+                      <option key={dept} value={dept} className="bg-slate-900 text-white py-2">
+                        {dept}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none text-slate-400">
+                    <ChevronDown className="w-4 h-4" />
+                  </div>
+                </div>
+              </div>
+
+              {/* Staff Name Selection */}
+              <div className="space-y-1.5">
+                <label htmlFor="staff-name-select" className="block text-xs font-bold text-slate-300 uppercase tracking-wide flex items-center gap-1.5">
+                  <User className="w-3.5 h-3.5 text-indigo-400" />
+                  Họ và tên của bạn
+                </label>
+                <div className="relative">
+                  <select
+                    id="staff-name-select"
+                    value={selectedStaffId}
+                    onChange={(e) => {
+                      setSelectedStaffId(e.target.value);
+                      setError(null);
+                    }}
+                    className="w-full pl-3 pr-10 py-3 bg-slate-950/80 border border-white/[0.08] hover:border-slate-600 rounded-xl text-sm font-bold text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 focus:shadow-[0_0_15px_rgba(59,130,246,0.2)] transition-all cursor-pointer appearance-none"
+                  >
+                    {(staffList[staffDept] || []).map((staff) => (
+                      <option key={staff.id} value={staff.id} className="bg-slate-900 text-white py-2">
+                        {staff.name} ({staff.major})
+                      </option>
+                    ))}
+                  </select>
+                  <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none text-slate-400">
+                    <ChevronDown className="w-4 h-4" />
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
           {/* Password Input (Hidden or styled as optional when passwordless) */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label htmlFor="password-input" className="block text-xs font-bold text-slate-300 uppercase tracking-wide">
-                Mật khẩu xác minh
-              </label>
-              <span className={`text-[10px] font-bold font-mono px-2 py-0.5 rounded ${isCurrentPasswordless ? 'bg-emerald-950/40 text-emerald-300 border border-emerald-800/30' : 'bg-amber-950/40 text-amber-300 border border-amber-800/20'}`}>
-                {getPasswordStatusText(selectedOption)}
-              </span>
-            </div>
-            
-            <div className="relative">
-              <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
-                <Lock className="w-4 h-4" />
-              </span>
-              <input
-                id="password-input"
-                type={showPassword ? 'text' : 'password'}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder={isCurrentPasswordless ? "Tài khoản hiện không cần mật khẩu. Hãy nhấn Đăng nhập!" : "Nhập mật khẩu riêng đã tạo để đăng nhập"}
-                disabled={isCurrentPasswordless}
-                className={`w-full pl-10 pr-10 py-2.5 bg-slate-900 border rounded-xl text-sm font-medium text-white placeholder-slate-500 focus:outline-hidden focus:ring-2 transition-all ${
-                  isCurrentPasswordless
-                    ? 'border-emerald-500/30 text-slate-400 focus:ring-emerald-500/50 bg-slate-900/50 cursor-pointer'
-                    : 'border-slate-700 focus:ring-blue-500'
-                }`}
-              />
-              {!isCurrentPasswordless && (
-                <button
-                  id="toggle-pass-visibility-btn"
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-slate-300 cursor-pointer"
-                >
-                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
+          {selectedOption !== 'staff' && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label htmlFor="password-input" className="block text-xs font-bold text-slate-300 uppercase tracking-wide">
+                  Mật khẩu xác minh
+                </label>
+                <span className={`text-[10px] font-bold font-mono px-2 py-0.5 rounded ${isCurrentPasswordless ? 'bg-emerald-950/40 text-emerald-300 border border-emerald-800/30' : 'bg-amber-950/40 text-amber-300 border border-amber-800/20'}`}>
+                  {getPasswordStatusText(selectedOption)}
+                </span>
+              </div>
+              
+              <div className="relative">
+                <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
+                  <Lock className="w-4 h-4" />
+                </span>
+                <input
+                  id="password-input"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={isCurrentPasswordless ? "Tài khoản hiện không cần mật khẩu. Hãy nhấn Đăng nhập!" : "Nhập mật khẩu riêng đã tạo để đăng nhập"}
+                  disabled={isCurrentPasswordless}
+                  className={`w-full pl-10 pr-10 py-2.5 bg-slate-950/80 border rounded-xl text-sm font-medium text-white placeholder-slate-500 focus:outline-hidden focus:ring-2 transition-all ${
+                    isCurrentPasswordless
+                      ? 'border-emerald-500/30 text-slate-400 focus:ring-emerald-500/50 bg-slate-950/40 cursor-not-allowed'
+                      : 'border-white/[0.08] focus:ring-blue-500/50 focus:border-blue-500 focus:shadow-[0_0_15px_rgba(59,130,246,0.2)]'
+                  }`}
+                />
+                {!isCurrentPasswordless && (
+                  <button
+                    id="toggle-pass-visibility-btn"
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-slate-300 cursor-pointer"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                )}
+              </div>
+              
+              {isCurrentPasswordless ? (
+                <p className="text-[10px] text-emerald-400 font-medium">
+                  ✨ Tài khoản này hiện tại chưa đặt mật khẩu khóa học. Mọi thành viên có quyền truy cập trực tiếp và có thể thiết lập mật khẩu bảo mật riêng từ menu sau khi đăng nhập.
+                </p>
+              ) : (
+                <p className="text-[10px] text-slate-400 italic">
+                  * tài khoản này đã được đặt mật khẩu khóa riêng. Nhập mật khẩu để tiếp tục.
+                </p>
               )}
             </div>
-            
-            {isCurrentPasswordless ? (
-              <p className="text-[10px] text-emerald-400 font-medium">
-                ✨ Tài khoản này hiện tại chưa đặt mật khẩu khóa học. Mọi thành viên có quyền truy cập trực tiếp và có thể thiết lập mật khẩu bảo mật riêng từ menu sau khi đăng nhập.
-              </p>
-            ) : (
-              <p className="text-[10px] text-slate-400 italic">
-                * tài khoản này đã được đặt mật khẩu khóa riêng. Nhập mật khẩu để tiếp tục.
-              </p>
-            )}
-          </div>
+          )}
 
           {/* Feedback alerts */}
           {error && (
@@ -291,7 +414,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
             id="login-submit-btn"
             type="submit"
             disabled={isLoading}
-            className="w-full py-3 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-500/10 cursor-pointer"
+            className="w-full py-3 px-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 hover:from-blue-500 hover:via-indigo-500 hover:to-violet-500 text-white font-extrabold text-xs uppercase tracking-widest rounded-xl transition-all duration-300 flex items-center justify-center gap-2.5 shadow-[0_4px_20px_rgba(59,130,246,0.25)] hover:shadow-[0_4px_25px_rgba(59,130,246,0.4)] active:scale-[0.98] cursor-pointer"
           >
             {isLoading ? (
               <>

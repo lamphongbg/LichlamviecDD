@@ -42,6 +42,71 @@ export const INITIAL_STAFF: Record<Department, Staff[]> = {
   ]
 };
 
+export interface HolidayInfo {
+  name: string;
+  shortName: string;
+}
+
+export function getVietnameseHoliday(year: number, month: number, day: number): HolidayInfo | null {
+  // month is 1-12
+  
+  // 1. Solar Holidays (Fixed every year)
+  if (month === 1 && day === 1) {
+    return { name: 'Tết Dương Lịch', shortName: 'Tết DL' };
+  }
+  if (month === 4 && day === 30) {
+    return { name: 'Ngày Giải Phóng Miền Nam (30/4)', shortName: '30/4' };
+  }
+  if (month === 5 && day === 1) {
+    return { name: 'Ngày Quốc Tế Lao Động (1/5)', shortName: '1/5' };
+  }
+  if (month === 9 && day === 2) {
+    return { name: 'Ngày Quốc Khánh (2/9)', shortName: '2/9' };
+  }
+  if (month === 9 && day === 3) {
+    return { name: 'Ngày nghỉ liền kề Quốc Khánh (3/9)', shortName: '3/9' };
+  }
+
+  // 2. Lunar Holidays (Mapped to Solar Dates for 2025, 2026, 2027)
+  if (year === 2025) {
+    // Tết Nguyên Đán 2025 (Jan 26 to Feb 2)
+    if (month === 1 && (day >= 26 && day <= 31)) {
+      return { name: 'Tết Nguyên Đán Ất Tỵ', shortName: 'Tết ÂL' };
+    }
+    if (month === 2 && (day === 1 || day === 2)) {
+      return { name: 'Tết Nguyên Đán Ất Tỵ', shortName: 'Tết ÂL' };
+    }
+    // Giỗ Tổ Hùng Vương 2025 (10/3 Âm lịch): April 7, 2025
+    if (month === 4 && day === 7) {
+      return { name: 'Giỗ Tổ Hùng Vương (10/3 ÂL)', shortName: 'Giỗ Tổ' };
+    }
+  }
+
+  if (year === 2026) {
+    // Tết Nguyên Đán 2026 (Feb 15 to Feb 22)
+    if (month === 2 && (day >= 15 && day <= 22)) {
+      return { name: 'Tết Nguyên Đán Bính Ngọ', shortName: 'Tết ÂL' };
+    }
+    // Giỗ Tổ Hùng Vương 2026 (10/3 Âm lịch): April 26, 2026
+    if (month === 4 && day === 26) {
+      return { name: 'Giỗ Tổ Hùng Vương (10/3 ÂL)', shortName: 'Giỗ Tổ' };
+    }
+  }
+
+  if (year === 2027) {
+    // Tết Nguyên Đán 2027 (Feb 5 to Feb 12)
+    if (month === 2 && (day >= 5 && day <= 12)) {
+      return { name: 'Tết Nguyên Đán Đinh Mùi', shortName: 'Tết ÂL' };
+    }
+    // Giỗ Tổ Hùng Vương 2027 (10/3 Âm lịch): April 16, 2027
+    if (month === 4 && day === 16) {
+      return { name: 'Giỗ Tổ Hùng Vương (10/3 ÂL)', shortName: 'Giỗ Tổ' };
+    }
+  }
+
+  return null;
+}
+
 // Generates correct days sequence for March 2026
 // Match with Sunday on 1st, 8th, 15th, 22nd, 29th
 export function getMarch2026Days() {
@@ -71,10 +136,25 @@ export const getInitialSchedule = (staffId: string, year?: number, monthOffset?:
   const daysInMonth = new Date(y, m + 1, 0).getDate();
   const isSunday = (dayNum: number) => new Date(y, m, dayNum).getDay() === 0;
 
-  // Standard weekday setting is X (full day work), Sunday is 0 (rest)
+  // Standard weekday setting is X (full day work), Sunday or Holiday is 0 (rest)
   for (let i = 1; i <= daysInMonth; i++) {
     const dateKey = i < 10 ? `0${i}` : `${i}`;
-    schedule[dateKey] = isSunday(i) ? '0' : 'X';
+    const holiday = getVietnameseHoliday(y, m + 1, i);
+    if (isSunday(i) || holiday !== null) {
+      schedule[dateKey] = '0';
+    } else {
+      // General procedural schedule pattern: distribute night shifts, 24h, and leaves realistically
+      const idNum = parseInt(staffId.replace(/\D/g, ''), 10) || 1;
+      if ((i + idNum) % 10 === 0) {
+        schedule[dateKey] = 'Đ'; // Trực đêm
+      } else if ((i + idNum) % 15 === 0) {
+        schedule[dateKey] = 'T'; // Trực 24h
+      } else if ((i + idNum) % 18 === 0) {
+        schedule[dateKey] = 'P';  // Nghỉ phép năm
+      } else {
+        schedule[dateKey] = 'X';
+      }
+    }
   }
 
   // Inject exact details matching the hospital image data perfectly:

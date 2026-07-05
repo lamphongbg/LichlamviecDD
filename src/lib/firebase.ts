@@ -404,6 +404,87 @@ export async function addChatMessageToFirestore(msg: ChatMessage) {
   await setDoc(doc(db, 'chat', msg.id), sanitizeForFirestore(msg));
 }
 
+export async function deleteChatMessageFromFirestore(id: string) {
+  await deleteDoc(doc(db, 'chat', id));
+}
+
+export async function clearChatHistoryFromFirestore(recipientUsername?: string, currentUserUsername?: string) {
+  const snap = await getDocs(collection(db, 'chat'));
+  const batch = writeBatch(db);
+  let count = 0;
+  snap.forEach((doc) => {
+    const data = doc.data() as ChatMessage;
+    if (!recipientUsername) {
+      // Clear absolutely everything
+      batch.delete(doc.ref);
+      count++;
+    } else if (recipientUsername === 'all') {
+      if (data.recipientUsername === 'all') {
+        batch.delete(doc.ref);
+        count++;
+      }
+    } else if (recipientUsername === 'leadership') {
+      if (data.recipientUsername === 'leadership') {
+        batch.delete(doc.ref);
+        count++;
+      }
+    } else {
+      // Direct message channel
+      const isDM = (data.senderUsername === currentUserUsername && data.recipientUsername === recipientUsername) ||
+                   (data.senderUsername === recipientUsername && data.recipientUsername === currentUserUsername);
+      if (isDM) {
+        batch.delete(doc.ref);
+        count++;
+      }
+    }
+  });
+  if (count > 0) {
+    await batch.commit();
+  }
+}
+
+export async function autoCleanupOldChatMessages(maxDays = 7) {
+  const snap = await getDocs(collection(db, 'chat'));
+  const batch = writeBatch(db);
+  const cutoffTime = Date.now() - maxDays * 24 * 60 * 60 * 1000;
+  let count = 0;
+  snap.forEach((doc) => {
+    const data = doc.data() as ChatMessage;
+    if (data.timestamp) {
+      const msgTime = new Date(data.timestamp).getTime();
+      if (msgTime < cutoffTime) {
+        batch.delete(doc.ref);
+        count++;
+      }
+    }
+  });
+  if (count > 0) {
+    await batch.commit();
+  }
+  return count;
+}
+
+export async function addChatMessageReactionToFirestore(messageId: string, username: string, emoji: string) {
+  const ref = doc(db, 'chat', messageId);
+  const snap = await getDoc(ref);
+  if (snap.exists()) {
+    const msg = snap.data() as ChatMessage;
+    const reactions = msg.reactions || {};
+    const userList = reactions[emoji] || [];
+    let updatedList: string[];
+    if (userList.includes(username)) {
+      updatedList = userList.filter(u => u !== username);
+    } else {
+      updatedList = [...userList, username];
+    }
+    const updatedReactions = { ...reactions, [emoji]: updatedList };
+    if (updatedList.length === 0) {
+      delete updatedReactions[emoji];
+    }
+    await updateDoc(ref, sanitizeForFirestore({ reactions: updatedReactions }));
+  }
+}
+
 // 7. Member Statuses Sync
 export function subscribeToMemberStatuses(onUpdate: (statuses: Record<string, string>) => void) {
   return onSnapshot(collection(db, 'memberStatuses'), (snapshot) => {

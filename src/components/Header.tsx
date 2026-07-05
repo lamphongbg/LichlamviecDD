@@ -289,22 +289,43 @@ export default function Header({
   } : {};
 
   const getDisplayUserInfo = () => {
+    // Attempt to load live custom names to ensure instant reflection without relogging
+    let liveNames: Record<string, string> = {};
+    try {
+      const cachedNames = localStorage.getItem('song_thuong_account_names_v3');
+      if (cachedNames) {
+        liveNames = JSON.parse(cachedNames);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+
     if (currentUser.role === 'ADMIN') {
+      const customName = liveNames['admin'] || currentUser.fullName;
       return {
-        fullName: 'Quản trị viên Hệ thống',
+        fullName: customName && !customName.includes('Quản trị viên') ? customName : 'Quản trị viên Hệ thống',
         title: 'Hệ thống Admin'
       };
     }
     
     if (currentUser.role === 'HEAD_OF_NURSING') {
       return {
-        fullName: currentUser.fullName && !currentUser.fullName.startsWith('Trưởng phòng') ? currentUser.fullName : 'Nguyễn Thanh Hương',
+        fullName: liveNames['phongdieuduong'] || 'Nguyễn Thanh Hương',
         title: 'Trưởng phòng Điều dưỡng'
       };
     }
     
     const dept = currentUser.department || 'Nội - Nhi';
-    let fullName = currentUser.fullName;
+    let userKey = '';
+    if (dept === 'Nội - Nhi') userKey = 'noinhi';
+    else if (dept === 'Ngoại') userKey = 'ngoai';
+    else if (dept === 'YHCT - PHCN') userKey = 'yhct';
+    else if (dept === 'LCK') userKey = 'lck';
+
+    let fullName = userKey ? liveNames[userKey] : '';
+    if (!fullName) {
+      fullName = currentUser.fullName;
+    }
     
     if (!fullName || fullName.startsWith('Điều dưỡng Trưởng Khoa')) {
       try {

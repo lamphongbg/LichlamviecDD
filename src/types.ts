@@ -1,4 +1,4 @@
-export type Role = 'CHIEF_NURSE' | 'HEAD_OF_NURSING' | 'ADMIN';
+export type Role = 'CHIEF_NURSE' | 'HEAD_OF_NURSING' | 'ADMIN' | 'STAFF';
 
 export type Department = string;
 
@@ -7,6 +7,8 @@ export type ScheduleCode =
   | 'X/2' // Làm nửa ngày (0.5)
   | 'S'   // Làm nửa ngày sáng (0.5)
   | 'C'   // Làm nửa ngày chiều (0.5)
+  | 'Đ'   // Trực đêm (1.0)
+  | 'T'   // Trực 24h (1.0)
   | '0'   // Nghỉ cả ngày (0.0)
   | 'O'   // Nghỉ cả ngày (alternative 'O', 0.0)
   | 'H'   // Đi học (0.0 but trackable)
@@ -108,8 +110,10 @@ export interface ChatMessage {
   timestamp: string;
   attachment?: {
     name: string;
-    type: 'pdf' | 'excel' | 'image';
+    type: 'pdf' | 'excel' | 'image' | 'word' | 'any';
     size: string;
+    dataUrl?: string;
   };
+  reactions?: Record<string, string[]>; // emoji -> list of usernames
 }
 

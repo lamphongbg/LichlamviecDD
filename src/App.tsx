@@ -8,6 +8,7 @@ import AIAdvisor from './components/AIAdvisor';
 import Login from './components/Login';
 import PasswordModal from './components/PasswordModal';
 import CommunicationCenter from './components/CommunicationCenter';
+import PersonalScheduleView from './components/PersonalScheduleView';
 import { FileSpreadsheet, BarChart3, HelpCircle, CheckCircle, Clock, AlertTriangle, RefreshCw, X, Trash, MessageSquare } from 'lucide-react';
 import { 
   seedInitialDataIfEmpty,
@@ -897,6 +898,17 @@ export default function App() {
     return <Login onLoginSuccess={handleLoginSuccess} />;
   }
 
+  if (currentUser.role === 'STAFF') {
+    return (
+      <PersonalScheduleView
+        currentUser={currentUser}
+        departmentSchedules={departmentSchedules}
+        onLogout={handleLogout}
+        staffList={staffList}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50/50 flex flex-col font-sans antialiased">
       
@@ -1022,6 +1034,7 @@ export default function App() {
             aiReport={aiReport}
             aiLoading={aiLoading}
             onTriggerAI={handleTriggerAI}
+            currentRole={currentRole}
           />
         ) : (
           <CommunicationCenter

@@ -7,9 +7,13 @@ import {
   addDirectiveReplyToFirestore,
   subscribeToChat,
   addChatMessageToFirestore,
+  addChatMessageReactionToFirestore,
   subscribeToMemberStatuses,
   updateMemberStatusInFirestore,
-  addNotificationToFirestore
+  addNotificationToFirestore,
+  deleteChatMessageFromFirestore,
+  clearChatHistoryFromFirestore,
+  autoCleanupOldChatMessages
 } from '../lib/firebase';
 import { 
   MessageSquare, 
@@ -33,6 +37,8 @@ import {
   Search,
   Paperclip,
   FileText,
+  File,
+  Upload,
   Image as ImageIcon,
   Check,
   Download,
@@ -41,6 +47,7 @@ import {
   Shield,
   Smile,
   XCircle,
+  X,
   FileSpreadsheet
 } from 'lucide-react';
 
@@ -99,7 +106,31 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
   const [isMuted, setIsMuted] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const [showSidebarOnMobile, setShowSidebarOnMobile] = useState(true);
+  const [pendingAttachment, setPendingAttachment] = useState<{
+    name: string;
+    type: 'pdf' | 'excel' | 'image' | 'word' | 'any';
+    size: string;
+    dataUrl?: string;
+  } | null>(null);
+  const [previewFile, setPreviewFile] = useState<{
+    name: string;
+    type: string;
+    size: string;
+    dataUrl?: string;
+    senderName?: string;
+    timestamp?: string;
+  } | null>(null);
+
+  // Custom confirmation modal state to bypass sandboxed iframe window.confirm block
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   // Dynamic names loaded from localStorage
   const [accountNames, setAccountNames] = useState<Record<string, string>>({});
@@ -236,6 +267,17 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
     };
   }, [isMuted, currentUser.username]);
 
+  // Run automatic cleanup of chat messages older than 7 days upon load
+  useEffect(() => {
+    autoCleanupOldChatMessages(7)
+      .then(count => {
+        if (count > 0) {
+          console.log(`[Dọn dẹp tự động]: Đã tự động dọn dẹp ${count} tin nhắn cũ hơn 7 ngày từ cơ sở dữ liệu.`);
+        }
+      })
+      .catch(err => console.error("Lỗi khi dọn dẹp tin nhắn cũ:", err));
+  }, []);
+
   // Scroll to bottom of chat when room or message count changes
   useEffect(() => {
     if (activeCommTab === 'CHAT' && chatContainerRef.current) {
@@ -313,9 +355,11 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
   };
 
   // Handle sending a chat message (text or attachment)
-  const handleSendChatMessage = (e?: React.FormEvent, attachmentObj?: { name: string; type: string; size: string }) => {
+  const handleSendChatMessage = (e?: React.FormEvent, attachmentObj?: { name: string; type: 'pdf' | 'excel' | 'image' | 'word' | 'any'; size: string; dataUrl?: string }) => {
     if (e) e.preventDefault();
-    if (!typedMessage.trim() && !attachmentObj) return;
+    
+    const finalAttachment = attachmentObj || pendingAttachment;
+    if (!typedMessage.trim() && !finalAttachment) return;
 
     const newMsg: ChatMessage = {
       id: `chat-${Date.now()}`,
@@ -323,26 +367,113 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
       senderName: currentUser.fullName,
       senderRole: currentUser.role,
       recipientUsername: activeRoom,
-      content: typedMessage.trim() || `[Đã gửi đính kèm: ${attachmentObj?.name}]`,
+      content: typedMessage.trim() || `[Đã gửi đính kèm: ${finalAttachment?.name}]`,
       timestamp: new Date().toISOString(),
-      ...(attachmentObj && {
+      ...(finalAttachment && {
         attachment: {
-          name: attachmentObj.name,
-          type: attachmentObj.type as any,
-          size: attachmentObj.size
+          name: finalAttachment.name,
+          type: finalAttachment.type,
+          size: finalAttachment.size,
+          dataUrl: finalAttachment.dataUrl
         }
       })
     };
 
     addChatMessageToFirestore(newMsg).catch(err => console.error("Error saving chat message to Firestore:", err));
     setTypedMessage('');
+    setPendingAttachment(null);
     setShowAttachmentDropdown(false);
+  };
+
+  // Handle uploading actual files from user's device
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+
+      // Determine file category
+      let type: 'pdf' | 'excel' | 'image' | 'word' | 'any' = 'any';
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      if (ext === 'pdf') type = 'pdf';
+      else if (['xlsx', 'xls', 'csv'].includes(ext || '')) type = 'excel';
+      else if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext || '')) type = 'image';
+      else if (['doc', 'docx'].includes(ext || '')) type = 'word';
+
+      // Human-readable size
+      let sizeStr = `${(file.size / 1024).toFixed(0)} KB`;
+      if (file.size > 1024 * 1024) {
+        sizeStr = `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
+      }
+
+      setPendingAttachment({
+        name: file.name,
+        type,
+        size: sizeStr,
+        dataUrl
+      });
+    };
+    reader.readAsDataURL(file);
+    e.target.value = ''; // Reset input
+  };
+
+  // Drag and drop handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+
+      let type: 'pdf' | 'excel' | 'image' | 'word' | 'any' = 'any';
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      if (ext === 'pdf') type = 'pdf';
+      else if (['xlsx', 'xls', 'csv'].includes(ext || '')) type = 'excel';
+      else if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext || '')) type = 'image';
+      else if (['doc', 'docx'].includes(ext || '')) type = 'word';
+
+      let sizeStr = `${(file.size / 1024).toFixed(0)} KB`;
+      if (file.size > 1024 * 1024) {
+        sizeStr = `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
+      }
+
+      setPendingAttachment({
+        name: file.name,
+        type,
+        size: sizeStr,
+        dataUrl
+      });
+    };
+    reader.readAsDataURL(file);
   };
 
   // Clear directive
   const handleDeleteDirective = (id: string) => {
-    if (!window.confirm('Bạn có chắc chắn muốn xóa văn bản chỉ đạo này không?')) return;
-    deleteDirectiveFromFirestore(id).catch(err => console.error("Error deleting directive in Firestore:", err));
+    setConfirmModal({
+      isOpen: true,
+      title: 'Xóa văn bản chỉ đạo',
+      message: 'Bạn có chắc chắn muốn xóa văn bản chỉ đạo này không? Thao tác này không thể hoàn tác.',
+      onConfirm: () => {
+        deleteDirectiveFromFirestore(id).catch(err => console.error("Error deleting directive in Firestore:", err));
+        setConfirmModal(null);
+      }
+    });
   };
 
   // Filter messages for active room
@@ -424,9 +555,7 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
       attachment: randomAttachment
     };
 
-    const updated = [...chatMessages, mockMsg];
-    setChatMessages(updated);
-    localStorage.setItem('song_thuong_chat_messages_v1', JSON.stringify(updated));
+    addChatMessageToFirestore(mockMsg).catch(err => console.error("Error saving simulated reply to Firestore:", err));
     
     // Also trigger alert
     const cachedNotifs = localStorage.getItem('song_thuong_notifications_v1') || '[]';
@@ -635,7 +764,9 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
                             H
                           </div>
                           <div className="flex flex-col truncate">
-                            <span className="font-bold">Nguyễn Thanh Hương</span>
+                            <span className="font-bold">
+                              {accountNames['phongdieuduong']?.split('(')[0].trim() || 'Nguyễn Thanh Hương'}
+                            </span>
                             <span className={`text-[9px] font-mono truncate ${isActive ? 'text-slate-300' : 'text-slate-400'}`}>
                               {status}
                             </span>
@@ -782,11 +913,11 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
       </div>
 
       {/* RIGHT DISPLAY PANEL - DETAIL STREAM */}
-      <div className={`flex-1 flex flex-col bg-white h-full ${!showSidebarOnMobile ? 'flex' : 'hidden md:flex'}`}>
+      <div className={`flex-1 min-w-0 flex flex-col bg-white h-full ${!showSidebarOnMobile ? 'flex' : 'hidden md:flex'}`}>
         
         {activeCommTab === 'DIRECTIVES' ? (
           /* ==================== DIRECTIVES TAB PANEL ==================== */
-          <div className="flex-1 flex flex-col h-full overflow-hidden">
+          <div className="flex-1 min-w-0 flex flex-col h-full overflow-hidden">
             
             {/* Header of Directives */}
             <div className="p-4 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1035,7 +1166,7 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
           </div>
         ) : (
           /* ==================== PERFECTED CHAT ROOM PANEL ==================== */
-          <div className="flex-1 flex flex-col h-full overflow-hidden">
+          <div className="flex-1 min-w-0 flex flex-col h-full overflow-hidden">
             
             {/* Header of Active Chat Room with Detailed Meta */}
             <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-4">
@@ -1082,29 +1213,73 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
                 </div>
               </div>
 
-              {/* Simulation panel of real-time reply */}
-              <button
-                type="button"
-                onClick={handleSimulateReply}
-                className="bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 font-extrabold text-[10px] px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 shadow-3xs shrink-0 cursor-pointer"
-                title="Mô phỏng tài khoản đối diện trả lời tự động để rà soát thời gian thực"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-purple-600 animate-bounce" />
-                <span>Simulate Reply</span>
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                {/* Clear Chat History button - Only displayed for ADMIN */}
+                {currentUser.role === 'ADMIN' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmModal({
+                        isOpen: true,
+                        title: 'Xóa toàn bộ lịch sử trò chuyện',
+                        message: 'Bạn có chắc chắn muốn xóa TOÀN BỘ lịch sử trò chuyện của kênh này không? Thao tác này không thể hoàn tác.',
+                        onConfirm: () => {
+                          clearChatHistoryFromFirestore(activeRoom, currentUser.username)
+                            .then(() => {
+                              // Clean local storage backup too
+                              localStorage.removeItem('song_thuong_chat_messages_v1');
+                            })
+                            .catch(err => console.error("Error clearing chat history in Firestore:", err));
+                          setConfirmModal(null);
+                        }
+                      });
+                    }}
+                    className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-extrabold text-[10px] px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 shadow-3xs cursor-pointer"
+                    title="Xóa toàn bộ lịch sử trò chuyện của phòng này"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                    <span>Xóa lịch sử</span>
+                  </button>
+                )}
+
+                {/* Simulation panel of real-time reply */}
+                <button
+                  type="button"
+                  onClick={handleSimulateReply}
+                  className="bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 font-extrabold text-[10px] px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 shadow-3xs shrink-0 cursor-pointer"
+                  title="Mô phỏng tài khoản đối diện trả lời tự động để rà soát thời gian thực"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-purple-600 animate-bounce" />
+                  <span>Simulate Reply</span>
+                </button>
+              </div>
             </div>
 
             {/* Chat message stream container */}
             <div 
               ref={chatContainerRef}
-              className="flex-1 overflow-y-auto p-4 bg-slate-50/40 flex flex-col gap-3.5"
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={`flex-1 overflow-y-auto p-4 flex flex-col gap-3.5 relative transition-all duration-200 ${
+                isDragging ? 'bg-emerald-50/50 border-2 border-dashed border-emerald-400' : 'bg-slate-50/40'
+              }`}
             >
+              {isDragging && (
+                <div className="absolute inset-0 bg-emerald-50/95 z-20 flex flex-col items-center justify-center gap-2 text-emerald-800 pointer-events-none animate-fadeIn">
+                  <div className="p-4 bg-emerald-100 rounded-full border border-emerald-300">
+                    <Upload className="w-10 h-10 text-emerald-700 animate-bounce" />
+                  </div>
+                  <span className="font-extrabold text-sm uppercase tracking-wide">Thả tệp vào đây để tải lên</span>
+                  <span className="text-[11px] font-semibold text-emerald-600">Hỗ trợ ảnh, PDF, Excel, Word và các định dạng tài liệu khác</span>
+                </div>
+              )}
               
               {/* Notification banner about secure chat */}
               <div className="p-3 rounded-xl bg-slate-100/80 border border-slate-200 text-[10.5px] text-slate-600 leading-relaxed flex items-center gap-2 max-w-xl mx-auto self-center text-center">
                 <Shield className="w-4 h-4 text-emerald-600 shrink-0" />
                 <span>
-                  Các cuộc hội thoại được bảo mật hai chiều trên máy chủ lưu trữ của bệnh viện. Mọi thông tin trực tuyến cập nhật ngay lập tức tới các điều dưỡng viên liên quan.
+                  Các cuộc hội thoại được bảo mật hai chiều trên máy chủ lưu trữ. <strong>Hệ thống tự động xóa tin nhắn cũ hơn 7 ngày để dọn dẹp và tối ưu bộ nhớ.</strong>
                 </span>
               </div>
 
@@ -1151,42 +1326,167 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
 
                         {/* HIGH-FIDELITY MEDICAL ATTACHMENT */}
                         {msg.attachment && (
-                          <div className={`p-2.5 rounded-xl border flex items-center gap-3 text-slate-800 ${
+                          <div className={`p-2 rounded-xl border flex flex-col gap-2 ${
                             isMe ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200'
                           }`}>
-                            <div className={`p-2 rounded-lg shrink-0 ${isMe ? 'bg-slate-700 text-emerald-400' : 'bg-emerald-100 text-emerald-800'}`}>
-                              {msg.attachment.type === 'pdf' ? (
-                                <FileText className="w-5 h-5" />
-                              ) : msg.attachment.type === 'excel' ? (
-                                <FileSpreadsheet className="w-5 h-5" />
-                              ) : (
-                                <ImageIcon className="w-5 h-5" />
-                              )}
+                            {msg.attachment.type === 'image' && msg.attachment.dataUrl && (
+                              <div className="overflow-hidden rounded-lg max-h-48 border border-slate-200/50 bg-white">
+                                <img 
+                                  src={msg.attachment.dataUrl} 
+                                  alt={msg.attachment.name} 
+                                  className="w-full h-auto object-contain cursor-pointer hover:scale-[1.02] transition-transform max-w-full" 
+                                  onClick={() => {
+                                    setPreviewFile({
+                                      name: msg.attachment!.name,
+                                      type: msg.attachment!.type,
+                                      size: msg.attachment!.size,
+                                      dataUrl: msg.attachment!.dataUrl,
+                                      senderName: msg.senderName,
+                                      timestamp: msg.timestamp
+                                    });
+                                  }}
+                                  referrerPolicy="no-referrer"
+                                />
+                              </div>
+                            )}
+                            <div className="flex items-center gap-3">
+                              {/* Clickable icon & info to trigger preview */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setPreviewFile({
+                                    name: msg.attachment!.name,
+                                    type: msg.attachment!.type,
+                                    size: msg.attachment!.size,
+                                    dataUrl: msg.attachment!.dataUrl,
+                                    senderName: msg.senderName,
+                                    timestamp: msg.timestamp
+                                  });
+                                }}
+                                className="flex-1 flex items-center gap-3 min-w-0 text-left hover:opacity-85 transition-opacity cursor-pointer"
+                                title="Xem trước tài liệu"
+                              >
+                                <div className={`p-2 rounded-lg shrink-0 ${isMe ? 'bg-slate-700 text-emerald-400' : 'bg-emerald-100 text-emerald-800'}`}>
+                                  {msg.attachment.type === 'pdf' ? (
+                                    <FileText className="w-5 h-5" />
+                                  ) : msg.attachment.type === 'excel' ? (
+                                    <FileSpreadsheet className="w-5 h-5" />
+                                  ) : msg.attachment.type === 'word' ? (
+                                    <FileText className="w-5 h-5 text-blue-500" />
+                                  ) : msg.attachment.type === 'image' ? (
+                                    <ImageIcon className="w-5 h-5" />
+                                  ) : (
+                                    <File className="w-5 h-5" />
+                                  )}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <p className={`font-black text-[10.5px] truncate flex items-center gap-1.5 ${isMe ? 'text-white' : 'text-slate-800'}`}>
+                                    <span className="truncate">{msg.attachment.name}</span>
+                                    <span className="text-[8px] bg-slate-100 text-slate-500 hover:bg-slate-200 border border-slate-200/50 rounded-sm px-1 font-bold">Xem</span>
+                                  </p>
+                                  <p className={`text-[9.5px] font-mono ${isMe ? 'text-slate-400' : 'text-slate-400'}`}>
+                                    {msg.attachment.size} • Đã quét mã độc an toàn
+                                  </p>
+                                </div>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (msg.attachment?.dataUrl) {
+                                    const link = document.createElement('a');
+                                    link.href = msg.attachment.dataUrl;
+                                    link.download = msg.attachment.name;
+                                    document.body.appendChild(link);
+                                    link.click();
+                                    document.body.removeChild(link);
+                                  } else {
+                                    alert(`Mô phỏng: Đang tải tệp tin an toàn: ${msg.attachment?.name}`);
+                                  }
+                                }}
+                                className="p-1 rounded bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 cursor-pointer shadow-3xs flex items-center justify-center shrink-0"
+                                title="Tải tệp tin về máy"
+                              >
+                                <Download className="w-3.5 h-3.5" />
+                              </button>
                             </div>
-                            <div className="flex-1 min-w-0">
-                              <p className={`font-black text-[10.5px] truncate ${isMe ? 'text-white' : 'text-slate-800'}`}>
-                                {msg.attachment.name}
-                              </p>
-                              <p className={`text-[9.5px] font-mono ${isMe ? 'text-slate-400' : 'text-slate-400'}`}>
-                                {msg.attachment.size} • Đã quét mã độc an toàn
-                              </p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => alert(`Mô phỏng: Đang tải tệp tin an toàn: ${msg.attachment?.name}`)}
-                              className="p-1 rounded bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 cursor-pointer shadow-3xs"
-                              title="Tải tệp tin về máy"
-                            >
-                              <Download className="w-3.5 h-3.5" />
-                            </button>
                           </div>
                         )}
                       </div>
 
-                      {/* Timestamp */}
-                      <span className="text-[9px] text-slate-400 mt-0.5 px-1">
-                        {new Date(msg.timestamp).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                      </span>
+                      {/* Existing Reactions */}
+                      {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1 px-1">
+                          {Object.entries(msg.reactions).map(([emoji, rawUsers]) => {
+                            const users = rawUsers as string[];
+                            return (
+                              <button
+                                key={emoji}
+                                type="button"
+                                onClick={() => addChatMessageReactionToFirestore(msg.id, currentUser.username, emoji)}
+                                className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-extrabold border transition-all cursor-pointer ${
+                                  users.includes(currentUser.username)
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-300 shadow-3xs'
+                                    : 'bg-white text-slate-600 border-slate-200'
+                                }`}
+                                title={`Đã thả bởi: ${users.join(', ')}`}
+                              >
+                                <span>{emoji}</span>
+                                <span>{users.length}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Timestamp and Rapid Reactions Row */}
+                      <div className={`flex items-center gap-1.5 mt-0.5 px-1 ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
+                        <span className="text-[9px] text-slate-400">
+                          {new Date(msg.timestamp).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                        </span>
+                        {(isMe || currentUser.role === 'ADMIN') && (
+                          <>
+                            <span className="text-slate-200">•</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setConfirmModal({
+                                  isOpen: true,
+                                  title: 'Xóa tin nhắn',
+                                  message: 'Bạn có chắc chắn muốn xóa tin nhắn này không? Thao tác này không thể hoàn tác.',
+                                  onConfirm: () => {
+                                    deleteChatMessageFromFirestore(msg.id).catch(err => console.error("Error deleting chat message in Firestore:", err));
+                                    setConfirmModal(null);
+                                  }
+                                });
+                              }}
+                              className="text-slate-400 hover:text-rose-600 transition-colors p-0.5 rounded cursor-pointer flex items-center justify-center"
+                              title="Xóa tin nhắn"
+                            >
+                              <Trash2 className="w-2.5 h-2.5" />
+                            </button>
+                          </>
+                        )}
+                        <span className="text-slate-250">•</span>
+                        <div className="flex items-center gap-1 bg-slate-50/80 px-1 py-0.5 rounded-md border border-slate-100 shadow-4xs">
+                          {['👍', '❤️', '👏', '⚠️'].map(emoji => {
+                            const users = msg.reactions?.[emoji] || [];
+                            const hasMyReaction = users.includes(currentUser.username);
+                            return (
+                              <button
+                                key={emoji}
+                                type="button"
+                                onClick={() => addChatMessageReactionToFirestore(msg.id, currentUser.username, emoji)}
+                                className={`text-[10px] p-0.5 rounded-md hover:bg-slate-200 transition-colors cursor-pointer ${
+                                  hasMyReaction ? 'bg-emerald-100 scale-110' : 'opacity-40 hover:opacity-100'
+                                }`}
+                                title={emoji === '👍' ? 'Đồng ý' : emoji === '❤️' ? 'Yêu thích' : emoji === '👏' ? 'Hoan hô' : 'Lưu ý khẩn'}
+                              >
+                                {emoji}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
                     </div>
                   );
                 })
@@ -1216,6 +1516,70 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
               onSubmit={(e) => handleSendChatMessage(e)}
               className="p-3 bg-white border-t border-slate-200 flex flex-col gap-2 relative"
             >
+              {/* GORGEOUS DRAFT PENDING FILE PREVIEW */}
+              {pendingAttachment && (
+                <div className="flex items-center justify-between gap-3 p-2.5 bg-emerald-50/70 border border-emerald-200 rounded-xl animate-fadeIn max-w-md">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="relative w-10 h-10 rounded-lg bg-white border border-emerald-100 flex items-center justify-center shrink-0 overflow-hidden shadow-3xs">
+                      {pendingAttachment.type === 'image' && pendingAttachment.dataUrl ? (
+                        <img 
+                          src={pendingAttachment.dataUrl} 
+                          alt={pendingAttachment.name} 
+                          className="w-full h-full object-cover"
+                          referrerPolicy="no-referrer"
+                        />
+                      ) : pendingAttachment.type === 'pdf' ? (
+                        <FileText className="w-5 h-5 text-rose-500" />
+                      ) : pendingAttachment.type === 'excel' ? (
+                        <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
+                      ) : pendingAttachment.type === 'word' ? (
+                        <FileText className="w-5 h-5 text-blue-500" />
+                      ) : (
+                        <File className="w-5 h-5 text-slate-500" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-black text-slate-800 truncate" title={pendingAttachment.name}>
+                        {pendingAttachment.name}
+                      </p>
+                      <p className="text-[9px] font-mono text-emerald-700 font-semibold">
+                        {pendingAttachment.size} • Sẵn sàng gửi an toàn
+                      </p>
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-center gap-1 shrink-0">
+                    {/* Preview download */}
+                    {pendingAttachment.dataUrl && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const link = document.createElement('a');
+                          link.href = pendingAttachment.dataUrl!;
+                          link.download = pendingAttachment.name;
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
+                        }}
+                        className="p-1.5 rounded-lg hover:bg-emerald-100 text-emerald-700 transition-colors cursor-pointer"
+                        title="Tải tệp đang soạn thảo về máy"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    {/* Clear attachment */}
+                    <button
+                      type="button"
+                      onClick={() => setPendingAttachment(null)}
+                      className="p-1.5 rounded-lg hover:bg-rose-100 text-rose-500 transition-colors cursor-pointer"
+                      title="Hủy đính kèm"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="flex items-center gap-2">
                 
                 {/* Simulated Attachment Button */}
@@ -1232,7 +1596,15 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
                   >
                     <Paperclip className="w-4 h-4" />
                   </button>
-
+ 
+                  {/* Hidden actual file input */}
+                  <input 
+                    type="file" 
+                    ref={fileInputRef} 
+                    className="hidden" 
+                    onChange={handleFileChange} 
+                  />
+ 
                   {/* Attachment dropdown menu */}
                   {showAttachmentDropdown && (
                     <div className="absolute bottom-12 left-0 w-72 bg-white border border-slate-200 rounded-2xl shadow-lg p-3 z-30 flex flex-col gap-2 animate-fadeIn">
@@ -1240,12 +1612,42 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
                         <Plus className="w-3.5 h-3.5 text-emerald-600" />
                         Đính kèm văn bản nghiệp vụ
                       </p>
-                      <div className="flex flex-col gap-1">
+ 
+                      {/* Real File Upload Option */}
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="flex items-center gap-2.5 p-2 rounded-xl text-left bg-emerald-50 text-emerald-800 hover:bg-emerald-100 transition-colors cursor-pointer border border-emerald-200/60"
+                      >
+                        <div className="p-1.5 rounded-lg bg-emerald-600 text-white shrink-0">
+                          <Upload className="w-4 h-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-extrabold text-[11px]">Tải lên tệp thực tế...</p>
+                          <span className="text-[9px] text-emerald-600/80">Chọn từ máy tính/điện thoại</span>
+                        </div>
+                      </button>
+ 
+                      <div className="h-px bg-slate-100 my-0.5" />
+ 
+                      <p className="font-extrabold text-[9px] text-slate-400 uppercase tracking-wider px-1">
+                        Hoặc chọn nhanh tệp mẫu:
+                      </p>
+ 
+                      <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
                         {HOSPITAL_FILES.map((f, index) => (
                           <button
                             key={index}
                             type="button"
-                            onClick={() => handleSendChatMessage(undefined, { name: f.name, type: f.type, size: f.size })}
+                            onClick={() => {
+                              setPendingAttachment({
+                                name: f.name,
+                                type: f.type as any,
+                                size: f.size,
+                                dataUrl: undefined
+                              });
+                              setShowAttachmentDropdown(false);
+                            }}
                             className="flex items-center gap-2.5 p-2 rounded-xl text-left hover:bg-slate-50 transition-colors cursor-pointer border border-transparent hover:border-slate-100"
                           >
                             <div className="p-1.5 rounded-lg bg-emerald-50 text-emerald-700 shrink-0">
@@ -1265,12 +1667,12 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
                         ))}
                       </div>
                       <div className="text-[8.5px] text-slate-400 bg-slate-50 p-1.5 rounded-lg text-center font-medium">
-                        Chọn tệp trên để mô phỏng tải lên và gửi an toàn tức thì.
+                        Chọn tệp thực tế hoặc tệp mẫu để chuẩn bị gửi kèm tin nhắn.
                       </div>
                     </div>
                   )}
                 </div>
-
+ 
                 {/* Primary input box */}
                 <input
                   type="text"
@@ -1283,14 +1685,14 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
                   onChange={(e) => setTypedMessage(e.target.value)}
                   className="flex-1 px-3 py-2.5 border border-slate-200 rounded-xl text-xs bg-white text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-emerald-500 font-bold placeholder-slate-400 shadow-4xs"
                 />
-
+ 
                 {/* Submit button */}
                 <button
                   type="submit"
-                  disabled={!typedMessage.trim()}
+                  disabled={!typedMessage.trim() && !pendingAttachment}
                   className={`p-2.5 rounded-xl transition-all shadow-xs shrink-0 cursor-pointer ${
-                    typedMessage.trim() 
-                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white' 
+                    typedMessage.trim() || pendingAttachment
+                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white hover:scale-105 active:scale-95' 
                       : 'bg-slate-100 text-slate-300 border border-slate-200 cursor-not-allowed'
                   }`}
                   title="Gửi tin nhắn"
@@ -1304,6 +1706,471 @@ export default function CommunicationCenter({ currentUser, staffList }: Communic
         )}
 
       </div>
+
+      {/* GORGEOUS INLINE FILE PREVIEW LIGHTBOX MODAL */}
+      {previewFile && (
+        <div className="fixed inset-0 z-50 bg-slate-900/85 backdrop-blur-md flex items-center justify-center p-4 md:p-6 animate-fadeIn">
+          <div className="relative bg-white border border-slate-200 w-full max-w-4xl h-full max-h-[85vh] rounded-3xl overflow-hidden shadow-2xl flex flex-col animate-scaleIn">
+            
+            {/* Modal Header */}
+            <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-4 shrink-0">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className={`p-2 rounded-xl shrink-0 ${
+                  previewFile.type === 'pdf' ? 'bg-red-50 text-red-700' :
+                  previewFile.type === 'excel' ? 'bg-emerald-50 text-emerald-700' :
+                  previewFile.type === 'word' ? 'bg-blue-50 text-blue-700' : 'bg-slate-50 text-slate-700'
+                }`}>
+                  {previewFile.type === 'pdf' ? (
+                    <FileText className="w-5 h-5" />
+                  ) : previewFile.type === 'excel' ? (
+                    <FileSpreadsheet className="w-5 h-5" />
+                  ) : previewFile.type === 'word' ? (
+                    <FileText className="w-5 h-5 text-blue-500" />
+                  ) : previewFile.type === 'image' ? (
+                    <ImageIcon className="w-5 h-5" />
+                  ) : (
+                    <File className="w-5 h-5" />
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <h3 className="font-black text-xs md:text-sm text-slate-950 truncate" title={previewFile.name}>
+                    {previewFile.name}
+                  </h3>
+                  <p className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-2">
+                    <span className="font-mono">{previewFile.size}</span>
+                    <span>•</span>
+                    <span>Tải lên bởi: <strong>{previewFile.senderName || 'Hệ thống'}</strong></span>
+                    {previewFile.timestamp && (
+                      <>
+                        <span>•</span>
+                        <span>{new Date(previewFile.timestamp).toLocaleTimeString('vi-VN')} {new Date(previewFile.timestamp).toLocaleDateString('vi-VN')}</span>
+                      </>
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                {previewFile.dataUrl ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const link = document.createElement('a');
+                      link.href = previewFile.dataUrl!;
+                      link.download = previewFile.name;
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
+                    }}
+                    className="p-2 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200/50 cursor-pointer transition-colors shadow-3xs flex items-center gap-1 text-[11px] font-bold"
+                    title="Tải tệp tin về máy"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span className="hidden sm:inline">Tải về</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => alert(`Mô phỏng: Đang tải tệp tin an toàn: ${previewFile.name}`)}
+                    className="p-2 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200/50 cursor-pointer transition-colors shadow-3xs flex items-center gap-1 text-[11px] font-bold"
+                    title="Tải tệp tin về máy"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span className="hidden sm:inline">Tải về</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setPreviewFile(null)}
+                  className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 cursor-pointer border border-slate-200/50 transition-colors shadow-3xs flex items-center justify-center shrink-0"
+                  title="Đóng cửa sổ"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-slate-100/50 flex flex-col">
+              {/* IMAGE PREVIEW */}
+              {previewFile.type === 'image' && (
+                <div className="flex-1 flex flex-col items-center justify-center gap-3">
+                  <div className="bg-white p-3 rounded-2xl border border-slate-200/70 shadow-sm max-h-[50vh] flex items-center justify-center overflow-hidden">
+                    {previewFile.dataUrl ? (
+                      <img 
+                        src={previewFile.dataUrl} 
+                        alt={previewFile.name} 
+                        className="max-w-full max-h-[46vh] object-contain rounded-lg shadow-4xs"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <div className="text-center p-12 text-slate-400">
+                        <ImageIcon className="w-16 h-16 mx-auto mb-2 opacity-30 animate-pulse" />
+                        <p className="text-xs">Không có dữ liệu hình ảnh thực tế</p>
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-center">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-900 text-white text-[10px] font-mono shadow-3xs">
+                      <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                      An toàn tuyệt đối • File ảnh PNG/JPG đã giải mã
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* PDF PREVIEW: Highly authentic clinical report rendering */}
+              {previewFile.type === 'pdf' && (
+                <div className="flex-1 bg-white border border-slate-200 shadow-sm rounded-2xl p-6 sm:p-8 max-w-2xl mx-auto w-full font-sans text-slate-800 leading-relaxed relative flex flex-col justify-between">
+                  {/* Digital Signature Emblem overlay */}
+                  <div className="absolute top-12 right-12 opacity-10 pointer-events-none select-none">
+                    <Shield className="w-40 h-40 text-emerald-800" />
+                  </div>
+
+                  <div>
+                    {/* Medical Header */}
+                    <div className="flex justify-between items-start border-b border-dashed border-slate-200 pb-4 mb-6">
+                      <div className="text-left">
+                        <h4 className="text-[11px] font-black text-slate-900 uppercase tracking-wide">SỞ Y TẾ BẮC GIANG</h4>
+                        <h5 className="text-[10px] font-extrabold text-slate-700 uppercase mt-0.5">BỆNH VIỆN ĐA KHOA SÔNG THƯƠNG</h5>
+                        <p className="text-[8.5px] text-slate-400 mt-1">Đ/c: Số 250 Lê Lợi, TP Bắc Giang</p>
+                      </div>
+                      <div className="text-right">
+                        <span className="inline-block px-2.5 py-1 rounded bg-slate-100 text-[9px] font-bold text-slate-700 border border-slate-200">
+                          MÃ LƯU TRỮ: {previewFile.name.toUpperCase().replace('.PDF', '')}
+                        </span>
+                        <p className="text-[8.5px] font-mono text-slate-400 mt-1">Hệ thống: e-Hospital v3.8</p>
+                      </div>
+                    </div>
+
+                    {/* Report Title */}
+                    <div className="text-center my-6">
+                      <h2 className="text-sm font-black text-slate-950 uppercase tracking-widest">
+                        {previewFile.name.includes('BC_Truc') ? 'BÁO CÁO GIAO BAN TRỰC HÀNH CHÍNH' : 'PHIẾU PHÊ DUYỆT TĂNG CƯỜNG NHÂN SỰ'}
+                      </h2>
+                      <p className="text-[10px] text-slate-500 font-bold mt-1 uppercase">
+                        Sổ theo dõi trực tuyến • Phòng Điều dưỡng trưởng
+                      </p>
+                    </div>
+
+                    {/* Report Content Details depending on File Name */}
+                    {previewFile.name.includes('BC_Truc') ? (
+                      <div className="space-y-4 text-xs">
+                        <div className="grid grid-cols-2 gap-4 bg-slate-50 p-3 rounded-xl border border-slate-150">
+                          <div>
+                            <p className="text-slate-500 font-bold text-[9.5px]">Ca trực hành chính:</p>
+                            <p className="font-extrabold text-slate-800">Trực ngày nghỉ / Lễ chuyên môn</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-500 font-bold text-[9.5px]">Điều dưỡng trưởng ca trực:</p>
+                            <p className="font-extrabold text-slate-800">Phạm Thị Cánh</p>
+                          </div>
+                        </div>
+
+                        <div>
+                          <h4 className="font-extrabold text-slate-900 mb-1 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-900" />
+                            I. Tình hình nhân lực & Hoạt động lâm sàng
+                          </h4>
+                          <p className="text-slate-600 pl-2.5">
+                            Quân số trực đầy đủ, đúng giờ quy định. Toàn ca trực thực hiện nghiêm chỉnh quy chế chuyên môn, quy trình kỹ thuật điều dưỡng và giao tiếp ứng xử văn minh.
+                          </p>
+                        </div>
+
+                        <div>
+                          <h4 className="font-extrabold text-slate-900 mb-1 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-900" />
+                            II. Chỉ số bệnh nhân trong ca
+                          </h4>
+                          <div className="overflow-x-auto pl-2.5 mt-1">
+                            <table className="w-full text-[10.5px] text-slate-700 border-collapse border border-slate-200">
+                              <thead>
+                                <tr className="bg-slate-50">
+                                  <th className="border border-slate-200 p-1 text-left font-extrabold">Khoa lâm sàng</th>
+                                  <th className="border border-slate-200 p-1 text-center font-extrabold">Số BN Hiện diện</th>
+                                  <th className="border border-slate-200 p-1 text-center font-extrabold">Bệnh nặng cấp C1</th>
+                                  <th className="border border-slate-200 p-1 text-center font-extrabold">Trực đặc biệt</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                <tr>
+                                  <td className="border border-slate-200 p-1">Khoa Nội - Nhi</td>
+                                  <td className="border border-slate-200 p-1 text-center">45</td>
+                                  <td className="border border-slate-200 p-1 text-center font-bold text-red-600">03</td>
+                                  <td className="border border-slate-200 p-1 text-center">02</td>
+                                </tr>
+                                <tr>
+                                  <td className="border border-slate-200 p-1">Khoa Ngoại</td>
+                                  <td className="border border-slate-200 p-1 text-center">32</td>
+                                  <td className="border border-slate-200 p-1 text-center font-bold text-red-600">02</td>
+                                  <td className="border border-slate-200 p-1 text-center">01</td>
+                                </tr>
+                                <tr>
+                                  <td className="border border-slate-200 p-1">Y học cổ truyền</td>
+                                  <td className="border border-slate-200 p-1 text-center">28</td>
+                                  <td className="border border-slate-200 p-1 text-center">00</td>
+                                  <td className="border border-slate-200 p-1 text-center">00</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+
+                        <div>
+                          <h4 className="font-extrabold text-slate-900 mb-1 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-900" />
+                            III. Sự cố phát sinh & Hướng giải quyết
+                          </h4>
+                          <p className="text-slate-600 pl-2.5">
+                            • Có 01 ca cấp cứu nặng chuyển khoa Nội từ Khoa Cấp cứu lúc 03h15. Đã bố trí tăng cường kíp trực chăm sóc tích cực, BN hiện ổn định.
+                          </p>
+                          <p className="text-slate-600 pl-2.5 mt-1">
+                            • Vật tư y tế dự phòng đầy đủ, không ghi nhận trục trặc trang thiết bị y khoa.
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-4 text-xs">
+                        <div className="grid grid-cols-2 gap-4 bg-slate-50 p-3 rounded-xl border border-slate-150">
+                          <div>
+                            <p className="text-slate-500 font-bold text-[9.5px]">Khoa đề xuất nhân lực:</p>
+                            <p className="font-extrabold text-slate-800">Khoa Ngoại Chấn Thương</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-500 font-bold text-[9.5px]">Thời gian tăng cường dự kiến:</p>
+                            <p className="font-extrabold text-slate-800">Trực đêm 05/07/2026 - 12/07/2026</p>
+                          </div>
+                        </div>
+
+                        <div>
+                          <h4 className="font-extrabold text-slate-900 mb-1 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-900" />
+                            1. Lý do xin tăng cường quân số trực
+                          </h4>
+                          <p className="text-slate-600 pl-2.5">
+                            Số lượng bệnh nhân phẫu thuật chương trình tăng đột biến trong tuần (tăng 45% so với tuần trước). Đồng thời, khoa tiếp nhận nhiều ca cấp cứu chấn thương từ tuyến dưới chuyển lên vào đêm khuya, gây quá tải cục bộ cho kíp trực chính quy.
+                          </p>
+                        </div>
+
+                        <div>
+                          <h4 className="font-extrabold text-slate-900 mb-1 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-900" />
+                            2. Kế hoạch điều động lâm sàng chi tiết
+                          </h4>
+                          <p className="text-slate-600 pl-2.5">
+                            • Điều động tăng cường thêm 01 Điều dưỡng trung cấp lâm sàng từ khoa Liên chuyên khoa sang Khoa Ngoại mỗi đêm.
+                          </p>
+                          <p className="text-slate-600 pl-2.5 mt-1">
+                            • Bố trí trực dự phòng tại nhà 01 Điều dưỡng đại học để sẵn sàng điều động khi có báo cáo khẩn cấp từ Trưởng kíp trực ngoại.
+                          </p>
+                        </div>
+
+                        <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-[11px] font-semibold">
+                          📣 Ý kiến Trưởng phòng Điều dưỡng: Đề xuất hoàn toàn phù hợp chuyên môn. Đã phê duyệt ký số điện tử điều động từ kíp trực luân phiên. Đề nghị khoa Ngoại tiếp nhận và bàn giao chỉ tiêu cụ thể đầu ca trực.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Signatures */}
+                  <div className="flex justify-between items-end border-t border-dashed border-slate-200 pt-6 mt-8">
+                    <div className="text-center w-1/3">
+                      <p className="text-[10px] text-slate-500">Người lập báo cáo</p>
+                      <p className="text-[10.5px] font-black text-slate-800 mt-8">ĐD Trưởng Khoa</p>
+                      <span className="text-[8px] bg-emerald-50 text-emerald-800 px-1 border border-emerald-300 rounded font-bold mt-1 inline-block">ĐÃ KÝ SỐ</span>
+                    </div>
+                    <div className="text-center w-1/3">
+                      <p className="text-[9px] text-slate-400 font-mono italic">Bảo mật nội bộ</p>
+                      <p className="text-[10px] font-extrabold text-emerald-700 mt-8 flex items-center justify-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        ĐÃ KIỂM DUYỆT
+                      </p>
+                    </div>
+                    <div className="text-center w-1/3">
+                      <p className="text-[10px] text-slate-500">Phê duyệt kiểm soát</p>
+                      <p className="text-[10.5px] font-black text-slate-800 mt-8">Trưởng Phòng Điều dưỡng</p>
+                      <span className="text-[8px] bg-emerald-50 text-emerald-800 px-1 border border-emerald-300 rounded font-bold mt-1 inline-block">ĐÃ PHÊ DUYỆT</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* EXCEL PREVIEW: Live clinical spreadsheet rendering with search and totals */}
+              {previewFile.type === 'excel' && (
+                <div className="flex-1 bg-white border border-slate-200 shadow-sm rounded-2xl p-4 md:p-6 max-w-4xl w-full mx-auto flex flex-col overflow-hidden">
+                  
+                  {/* Excel Tools Header */}
+                  <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 p-2.5 rounded-xl border border-slate-200 mb-4 text-xs font-semibold text-slate-600">
+                    <div className="flex items-center gap-2">
+                      <span className="bg-emerald-600 text-white font-black px-2 py-1 rounded text-[10px] font-mono">XLSX READER</span>
+                      <span className="text-slate-700 font-extrabold">BẢNG TỔNG HỢP KIỂM TRA ĐIỀU DƯỠNG QUÝ II</span>
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-400 bg-white border border-slate-150 px-2.5 py-1 rounded-lg">
+                      Số lượng hàng: 6 hàng • Đã tự động tính tổng
+                    </div>
+                  </div>
+
+                  {/* Spreadsheet table */}
+                  <div className="flex-1 overflow-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-xs text-left text-slate-700 border-collapse">
+                      <thead>
+                        <tr className="bg-slate-100 text-slate-600 font-bold border-b border-slate-200 text-[10.5px] uppercase font-mono">
+                          <th className="p-2.5 border-r border-slate-200 text-center w-10 bg-slate-150"></th>
+                          <th className="p-2.5 border-r border-slate-200 min-w-[240px]">A - Chỉ số kiểm tra chất lượng</th>
+                          <th className="p-2.5 border-r border-slate-200 text-center">B - Chỉ tiêu</th>
+                          <th className="p-2.5 border-r border-slate-200 text-center">C - Khoa Nội</th>
+                          <th className="p-2.5 border-r border-slate-200 text-center">D - Khoa Ngoại</th>
+                          <th className="p-2.5 border-r border-slate-200 text-center">E - Khoa Sản</th>
+                          <th className="p-2.5 text-center">F - Tỷ lệ đạt (%)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[
+                          { id: 1, name: 'Bàn giao ca đầy đủ, có ký số xác nhận điện tử', target: '100%', n: '100%', ng: '100%', s: '95%', rate: '98.3%' },
+                          { id: 2, name: 'Hồ sơ bệnh án sắp xếp khoa học, sạch đẹp', target: '95%', n: '98%', ng: '92%', s: '96%', rate: '95.3%' },
+                          { id: 3, name: 'Sử dụng vật tư y tế đúng quy trình định mức', target: '100%', n: '100%', ng: '100%', s: '100%', rate: '100%' },
+                          { id: 4, name: 'Tỷ lệ người bệnh hài lòng khi phục vụ lâm sàng', target: '90%', n: '94%', ng: '91%', s: '95%', rate: '93.3%' },
+                          { id: 5, name: 'Thực hiện đúng quy tắc vô khuẩn buồng bệnh', target: '100%', n: '100%', ng: '98%', s: '100%', rate: '99.3%' },
+                          { id: 6, name: 'Chữ ký số hồ sơ bệnh án hoàn thành đúng giờ', target: '95%', n: '96%', ng: '90%', s: '94%', rate: '93.3%' }
+                        ].map((row, index) => (
+                          <tr key={row.id} className="border-b border-slate-150 hover:bg-slate-50/50 transition-colors">
+                            <td className="p-2.5 border-r border-slate-200 text-center font-mono font-bold text-slate-400 bg-slate-50/60">{index + 1}</td>
+                            <td className="p-2.5 border-r border-slate-200 font-bold text-slate-800">{row.name}</td>
+                            <td className="p-2.5 border-r border-slate-200 text-center font-semibold font-mono text-slate-600">{row.target}</td>
+                            <td className="p-2.5 border-r border-slate-200 text-center font-bold font-mono text-blue-600">{row.n}</td>
+                            <td className="p-2.5 border-r border-slate-200 text-center font-bold font-mono text-purple-600">{row.ng}</td>
+                            <td className="p-2.5 border-r border-slate-200 text-center font-bold font-mono text-indigo-600">{row.s}</td>
+                            <td className="p-2.5 text-center font-black font-mono text-emerald-700 bg-emerald-50/30">{row.rate}</td>
+                          </tr>
+                        ))}
+                        {/* Summary / Total row */}
+                        <tr className="bg-slate-50 font-black border-t-2 border-slate-300">
+                          <td className="p-2.5 border-r border-slate-200 text-center font-mono text-slate-400 bg-slate-100">∑</td>
+                          <td className="p-2.5 border-r border-slate-200 text-slate-900 font-extrabold text-[11px] uppercase">CHỈ SỐ TRUNG BÌNH TOÀN VIỆN</td>
+                          <td className="p-2.5 border-r border-slate-200 text-center font-mono text-slate-700">96.6%</td>
+                          <td className="p-2.5 border-r border-slate-200 text-center font-mono text-emerald-700 bg-emerald-50/30">98.0%</td>
+                          <td className="p-2.5 border-r border-slate-200 text-center font-mono text-emerald-700 bg-emerald-50/30">95.1%</td>
+                          <td className="p-2.5 border-r border-slate-200 text-center font-mono text-emerald-700 bg-emerald-50/30">96.0%</td>
+                          <td className="p-2.5 text-center font-extrabold text-[12px] text-emerald-800 bg-emerald-100/40">96.5%</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Summary eval */}
+                  <div className="mt-4 p-3.5 bg-emerald-50/55 border border-emerald-200 rounded-xl flex items-start gap-2.5">
+                    <Shield className="w-4 h-4 text-emerald-700 mt-0.5 shrink-0" />
+                    <div>
+                      <p className="font-extrabold text-xs text-emerald-900">ĐÁNH GIÁ CHẤT LƯỢNG KỲ BÁO CÁO</p>
+                      <p className="text-[11px] text-emerald-700 mt-0.5 font-medium">
+                        Điểm trung bình toàn viện đạt <strong>96.5%</strong>, đạt mức chỉ tiêu xuất sắc loại A. Điểm số cao nhất thuộc về chỉ số quản lý vật tư y tế và bàn giao ca hành chính lâm sàng. Đề xuất Trưởng phòng Điều dưỡng ký duyệt áp dụng biểu mẫu kiểm tra số hóa này cho Quý III/2026.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* WORD / OTHER DOCUMENT PREVIEW */}
+              {previewFile.type !== 'image' && previewFile.type !== 'pdf' && previewFile.type !== 'excel' && (
+                <div className="flex-1 bg-white border border-slate-200 shadow-sm rounded-2xl p-6 sm:p-8 max-w-2xl mx-auto w-full flex flex-col justify-between">
+                  <div>
+                    <div className="border-b border-slate-100 pb-3 mb-4">
+                      <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 font-mono">Dữ liệu tài liệu</span>
+                      <h3 className="font-black text-slate-900 text-sm mt-0.5">{previewFile.name}</h3>
+                    </div>
+                    
+                    <div className="py-6 text-center text-slate-400">
+                      <File className="w-16 h-16 mx-auto text-slate-300 mb-2" />
+                      <p className="text-xs font-bold text-slate-600">Định dạng văn bản thông dụng</p>
+                      <p className="text-[10px] text-slate-400 mt-1 max-w-md mx-auto">
+                        Tệp tài liệu an toàn đã mã hóa trên hệ thống Bệnh viện Sông Thương. Vui lòng bấm nút "Tải về máy" bên dưới để đọc toàn bộ nội dung chi tiết.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="border-t border-slate-100 pt-4 mt-6 text-center">
+                    {previewFile.dataUrl ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const link = document.createElement('a');
+                          link.href = previewFile.dataUrl!;
+                          link.download = previewFile.name;
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
+                        }}
+                        className="bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-xs px-5 py-2.5 rounded-xl transition-all cursor-pointer inline-flex items-center gap-1.5 shadow-sm"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span>Tải tệp tin tức thì ({previewFile.size})</span>
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-amber-600 bg-amber-50 px-3 py-1 rounded-full border border-amber-200 font-semibold">
+                        Đây là tệp tin mô phỏng của hệ thống
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 shrink-0">
+              <span className="text-[10px] text-slate-500 font-medium flex items-center gap-1">
+                <Shield className="w-4 h-4 text-emerald-600" />
+                <span>Mã hóa AES-256 an toàn • Chỉ lưu trữ nội bộ bệnh viện</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setPreviewFile(null)}
+                className="bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-xs px-4 py-2 rounded-xl cursor-pointer transition-all shadow-3xs"
+              >
+                Đóng xem trước
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* BEAUTIFUL CUSTOM STATE-BASED CONFIRMATION MODAL */}
+      {confirmModal?.isOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white border border-slate-200 w-full max-w-md rounded-3xl overflow-hidden shadow-2xl p-6 animate-scaleIn">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 bg-rose-50 text-rose-600 rounded-xl shrink-0">
+                <ShieldAlert className="w-5 h-5 animate-pulse" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="font-extrabold text-slate-950 text-sm">
+                  {confirmModal.title}
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-2 leading-relaxed font-medium">
+                  {confirmModal.message}
+                </p>
+              </div>
+            </div>
+            
+            <div className="flex items-center justify-end gap-2.5 mt-5">
+              <button
+                type="button"
+                onClick={() => setConfirmModal(null)}
+                className="px-4 py-2 border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-xl transition-all cursor-pointer"
+              >
+                Hủy bỏ
+              </button>
+              <button
+                type="button"
+                onClick={confirmModal.onConfirm}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-black rounded-xl transition-all cursor-pointer shadow-3xs"
+              >
+                Xác nhận xóa
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

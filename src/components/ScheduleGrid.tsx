@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { DepartmentSchedule, Staff, ScheduleCode, DaySchedule, Department, Role, DeleteRequest } from '../types';
-import { getMarch2026Days } from '../initialData';
+import { getMarch2026Days, getVietnameseHoliday, HolidayInfo } from '../initialData';
 import { Plus, Trash, CheckCircle2, AlertTriangle, XCircle, Search, HelpCircle, Save, Check, FileDown, FileUp, ArrowRightLeft, Clock, Sliders, Edit3, CheckSquare, XSquare, Users, Calendar } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { exportToExcel, exportExcelTemplate, exportWeeklyToExcel } from './ExcelExporter';
@@ -108,13 +108,31 @@ export default function ScheduleGrid({
         dayIndex,
         dayName: dayNames[dayIndex],
         isSunday: dayIndex === 0,
+        holiday: getVietnameseHoliday(year, month, i),
       });
     }
     return displayDays;
   }, [selectedMonth]);
 
   const [searchTerm, setSearchTerm] = useState('');
+  const [hoveredDate, setHoveredDate] = useState<string | null>(null);
   const [activeCell, setActiveCell] = useState<{ staffId: string; date: string } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState<{ staffId: string; dateStr: string } | null>(null);
+  const [selectedCells, setSelectedCells] = useState<{ staffId: string; dateStr: string }[]>([]);
+
+  useEffect(() => {
+    const handleGlobalMouseUp = () => {
+      setIsDragging(false);
+    };
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+    window.addEventListener('touchend', handleGlobalMouseUp);
+    return () => {
+      window.removeEventListener('mouseup', handleGlobalMouseUp);
+      window.removeEventListener('touchend', handleGlobalMouseUp);
+    };
+  }, []);
+
   const [isEditingCell, setIsEditingCell] = useState<boolean>(false);
   const [showAddForm, setShowAddForm] = useState(false);
   const [showStaffManagementModal, setShowStaffManagementModal] = useState(false);
@@ -241,6 +259,8 @@ export default function ScheduleGrid({
           block: 'nearest',
           inline: 'nearest'
         });
+        // Physically focus the cell for immediate keyboard accessibility
+        tdEl.focus({ preventScroll: true });
       }
     }
   }, [activeCell]);
@@ -320,6 +340,7 @@ export default function ScheduleGrid({
     isCurrentMonth: boolean;
     targetMonth: string;
     targetDayKey: string;
+    holiday?: HolidayInfo | null;
   }
 
   const getISOWeekDates = (weekNum: number, year: number, selectedMonthStr: string): DisplayDay[] => {
@@ -362,7 +383,8 @@ export default function ScheduleGrid({
          isSunday: dayIndex === 0,
          isCurrentMonth,
          targetMonth,
-         targetDayKey
+         targetDayKey,
+         holiday: getVietnameseHoliday(dayYear, dayMonth, dayDate),
        });
     }
     
@@ -381,7 +403,8 @@ export default function ScheduleGrid({
           isSunday: d.isSunday,
           isCurrentMonth: true,
           targetMonth: selectedMonth,
-          targetDayKey: d.dateStr
+          targetDayKey: d.dateStr,
+          holiday: d.holiday
         }))
       : getISOWeekDates(selectedWeek, yearNum, selectedMonth);
   }, [selectedWeek, days, yearNum, selectedMonth]);
@@ -397,7 +420,7 @@ export default function ScheduleGrid({
       let deptActive = 0;
       deptSchedule.schedules.forEach(s => {
         const code = s.schedule[d.dateStr];
-        if (code === 'X') deptActive += 1.0;
+        if (code === 'X' || code === 'Đ' || code === 'T') deptActive += 1.0;
         else if (code === 'X/2' || code === 'S' || code === 'C') deptActive += 0.5;
       });
       
@@ -601,6 +624,8 @@ export default function ScheduleGrid({
       { code: 'X/2', label: 'X/2', desc: 'Làm nửa ngày (0.5)', color: 'bg-emerald-50 text-emerald-700 font-bold border-emerald-200' },
       { code: 'S', label: 'S', desc: 'Làm sáng (0.5)', color: 'bg-teal-50 text-teal-700 font-bold border-teal-200' },
       { code: 'C', label: 'C', desc: 'Làm chiều (0.5)', color: 'bg-cyan-50 text-cyan-700 font-bold border-cyan-200' },
+      { code: 'Đ', label: 'Đ', desc: 'Trực đêm (1.0)', color: 'bg-indigo-900 text-indigo-100 font-bold border-indigo-700' },
+      { code: 'T', label: 'T', desc: 'Trực 24h (1.0)', color: 'bg-purple-900 text-purple-100 font-bold border-purple-700' },
       { code: '0', label: '0', desc: 'Nghỉ cả ngày', color: 'bg-rose-100 text-rose-800 font-bold border-rose-300' },
       { code: 'H', label: 'H', desc: 'Đi học chuyên nghiệp', color: 'bg-amber-100 text-amber-800 font-bold border-amber-300' },
       { code: 'KL', label: 'KL', desc: 'Nghỉ không lương', color: 'bg-gray-100 text-gray-700 font-semibold border-gray-300' },
@@ -701,10 +726,13 @@ export default function ScheduleGrid({
         }
 
         if (nextDayIndex !== currentDayIndex || nextStaffIndex !== currentStaffIndex) {
+          const nextStaffId = orderedStaffs[nextStaffIndex].id;
+          const nextDateStr = filteredDays[nextDayIndex].dateStr;
           setActiveCell({
-            staffId: orderedStaffs[nextStaffIndex].id,
-            date: filteredDays[nextDayIndex].dateStr
+            staffId: nextStaffId,
+            date: nextDateStr
           });
+          setSelectedCells([{ staffId: nextStaffId, dateStr: nextDateStr }]);
           setIsEditingCell(false);
         }
         return;
@@ -714,6 +742,7 @@ export default function ScheduleGrid({
       if (key === 'Escape') {
         e.preventDefault();
         setActiveCell(null);
+        setSelectedCells([]);
         setIsEditingCell(false);
         return;
       }
@@ -765,27 +794,34 @@ export default function ScheduleGrid({
       }
 
       if (codeToApply !== null) {
-        const targetDay = filteredDays.find(fd => fd.dateStr === date);
-        if (targetDay) {
-          onUpdateSchedule(dept, staffId, targetDay.targetDayKey, codeToApply, targetDay.targetMonth);
+        if (selectedCells.length > 1) {
+          handleApplyBatchCode(codeToApply);
         } else {
-          onUpdateSchedule(dept, staffId, date, codeToApply);
+          const targetDay = filteredDays.find(fd => fd.dateStr === date);
+          if (targetDay) {
+            onUpdateSchedule(dept, staffId, targetDay.targetDayKey, codeToApply, targetDay.targetMonth);
+          } else {
+            onUpdateSchedule(dept, staffId, date, codeToApply);
+          }
+          // Automatically jump to the next cell (next day in filteredDays) on the same staff row
+          const currentDayIndex = filteredDays.findIndex(d => d.dateStr === date);
+          if (currentDayIndex + 1 < filteredDays.length) {
+            const nextDayStr = filteredDays[currentDayIndex + 1].dateStr;
+            setActiveCell({
+              staffId: staffId,
+              date: nextDayStr
+            });
+            setSelectedCells([{ staffId, dateStr: nextDayStr }]);
+          } else {
+            // Keep on current cell but select it
+            setActiveCell({
+              staffId: staffId,
+              date: date
+            });
+            setSelectedCells([{ staffId, dateStr: date }]);
+          }
+          setIsEditingCell(false);
         }
-        // Automatically jump to the next cell (next day in filteredDays) on the same staff row
-        const currentDayIndex = filteredDays.findIndex(d => d.dateStr === date);
-        if (currentDayIndex + 1 < filteredDays.length) {
-          setActiveCell({
-            staffId: staffId,
-            date: filteredDays[currentDayIndex + 1].dateStr
-          });
-        } else {
-          // Keep on current cell but select it
-          setActiveCell({
-            staffId: staffId,
-            date: date
-          });
-        }
-        setIsEditingCell(false);
       }
     };
 
@@ -800,6 +836,19 @@ export default function ScheduleGrid({
       }
     }
     return null;
+  };
+
+  const isStaffEditable = (staffId: string): boolean => {
+    if ((currentRole as string) === 'ADMIN') return true;
+    const dept = getStaffDepartment(staffId);
+    if (!dept) return false;
+    const deptSchedule = departmentSchedules.find(s => s.department === dept && s.month === selectedMonth);
+    if (!deptSchedule) {
+      return currentRole === 'CHIEF_NURSE' || currentRole === 'HEAD_OF_NURSING';
+    }
+    return (currentRole as string) === 'ADMIN' || 
+      (currentRole === 'HEAD_OF_NURSING' && deptSchedule.status !== 'APPROVED') || 
+      (currentRole === 'CHIEF_NURSE' && (deptSchedule.status === 'DRAFT' || deptSchedule.status === 'REJECTED'));
   };
 
   const getStaffDetails = (staffId: string): Staff | undefined => {
@@ -821,7 +870,7 @@ export default function ScheduleGrid({
     Object.entries(schedule).forEach(([dateKey, code]) => {
       // Only count days belonging to the primary month (represented by 2-digit keys like "01", "25", etc.)
       if (dateKey.length === 2) {
-        if (code === 'X') totalWorkdays += 1.0;
+        if (code === 'X' || code === 'Đ' || code === 'T') totalWorkdays += 1.0;
         else if (code === 'X/2' || code === 'S' || code === 'C') totalWorkdays += 0.5;
         else if (code === 'P') personalLeaves += 1;
         else if (code === 'KL') unpaidLeaves += 1;
@@ -831,6 +880,125 @@ export default function ScheduleGrid({
     });
 
     return { totalWorkdays, personalLeaves, unpaidLeaves, maternityLeaves, studyDays };
+  };
+
+  const handleCellMouseDown = (staffId: string, dateStr: string, e: React.MouseEvent) => {
+    if (e.button !== 0) return; // Only left-click
+    setIsDragging(true);
+    setDragStart({ staffId, dateStr });
+    setSelectedCells([{ staffId, dateStr }]);
+    setActiveCell({ staffId, date: dateStr });
+  };
+
+  const handleCellMouseEnter = (staffId: string, dateStr: string) => {
+    setHoveredDate(dateStr);
+    if (!isDragging || !dragStart) return;
+
+    const startStaffIdx = orderedStaffs.findIndex(s => s.id === dragStart.staffId);
+    const endStaffIdx = orderedStaffs.findIndex(s => s.id === staffId);
+    const startDayIdx = filteredDays.findIndex(d => d.dateStr === dragStart.dateStr);
+    const endDayIdx = filteredDays.findIndex(d => d.dateStr === dateStr);
+
+    if (startStaffIdx === -1 || endStaffIdx === -1 || startDayIdx === -1 || endDayIdx === -1) return;
+
+    const minStaffIdx = Math.min(startStaffIdx, endStaffIdx);
+    const maxStaffIdx = Math.max(startStaffIdx, endStaffIdx);
+    const minDayIdx = Math.min(startDayIdx, endDayIdx);
+    const maxDayIdx = Math.max(startDayIdx, endDayIdx);
+
+    const newSelection: { staffId: string; dateStr: string }[] = [];
+    for (let sIdx = minStaffIdx; sIdx <= maxStaffIdx; sIdx++) {
+      const s = orderedStaffs[sIdx];
+      for (let dIdx = minDayIdx; dIdx <= maxDayIdx; dIdx++) {
+        const d = filteredDays[dIdx];
+        newSelection.push({ staffId: s.id, dateStr: d.dateStr });
+      }
+    }
+    setSelectedCells(newSelection);
+  };
+
+  const handleTouchStart = (staffId: string, dateStr: string, e: React.TouchEvent) => {
+    setIsDragging(true);
+    setDragStart({ staffId, dateStr });
+    setSelectedCells([{ staffId, dateStr }]);
+    setActiveCell({ staffId, date: dateStr });
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!isDragging || !dragStart) return;
+    const touch = e.touches[0];
+    const targetEl = document.elementFromPoint(touch.clientX, touch.clientY);
+    if (!targetEl) return;
+    
+    const tdEl = targetEl.closest('td[id^="td-"]');
+    if (tdEl) {
+      const idParts = tdEl.id.split('-');
+      if (idParts.length >= 3) {
+        const dateStr = idParts[idParts.length - 1];
+        const staffId = idParts.slice(1, idParts.length - 1).join('-');
+        handleCellMouseEnter(staffId, dateStr);
+      }
+    }
+  };
+
+  const handleApplyBatchCode = (code: ScheduleCode) => {
+    if (selectedCells.length === 0) return;
+
+    if (onBulkUpdateSchedules) {
+      // Clone the current schedules
+      const updatedSchedules = JSON.parse(JSON.stringify(departmentSchedules)) as DepartmentSchedule[];
+
+      selectedCells.forEach(cell => {
+        const dept = getStaffDepartment(cell.staffId);
+        if (!dept) return;
+
+        const targetDay = filteredDays.find(fd => fd.dateStr === cell.dateStr);
+        const dayKey = targetDay ? targetDay.targetDayKey : cell.dateStr;
+        const targetMonth = targetDay ? targetDay.targetMonth : selectedMonth;
+
+        let deptSche = updatedSchedules.find(s => s.department === dept && s.month === targetMonth);
+        if (!deptSche) {
+          const newSche: DepartmentSchedule = {
+            department: dept,
+            month: targetMonth,
+            status: 'DRAFT',
+            schedules: [],
+            updatedAt: new Date().toISOString()
+          };
+          updatedSchedules.push(newSche);
+          deptSche = newSche;
+        }
+
+        let staffSche = deptSche.schedules.find(s => s.staffId === cell.staffId);
+        if (!staffSche) {
+          staffSche = {
+            staffId: cell.staffId,
+            schedule: {},
+            notes: ''
+          };
+          deptSche.schedules.push(staffSche);
+        }
+
+        staffSche.schedule[dayKey] = code;
+      });
+
+      onBulkUpdateSchedules(updatedSchedules);
+    } else {
+      // Fallback
+      selectedCells.forEach(cell => {
+        const dept = getStaffDepartment(cell.staffId);
+        if (!dept) return;
+        const targetDay = filteredDays.find(fd => fd.dateStr === cell.dateStr);
+        if (targetDay) {
+          onUpdateSchedule(dept, cell.staffId, targetDay.targetDayKey, code, targetDay.targetMonth);
+        } else {
+          onUpdateSchedule(dept, cell.staffId, cell.dateStr, code);
+        }
+      });
+    }
+
+    setSelectedCells([]);
+    setActiveCell(null);
   };
 
   const handleApplyCode = (code: ScheduleCode) => {
@@ -1111,15 +1279,15 @@ export default function ScheduleGrid({
             </div>
 
             {/* Week Tab Selectors */}
-            <div className="flex flex-wrap gap-0.5 p-0.5 bg-gray-200/50 border border-gray-200/70 rounded-lg max-w-full">
+            <div className="flex flex-wrap gap-1 p-1 bg-slate-100 border border-slate-200/80 rounded-xl max-w-full shadow-3xs">
               <button
                 id="week-btn-all"
                 type="button"
                 onClick={() => setSelectedWeek('ALL')}
-                className={`px-2.5 py-1 text-xs font-bold rounded transition-all cursor-pointer shrink-0 ${
+                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer shrink-0 ${
                   selectedWeek === 'ALL'
-                    ? 'bg-blue-600 text-white shadow-xs'
-                    : 'text-slate-600 hover:bg-slate-300 hover:text-slate-800'
+                    ? 'bg-blue-600 text-white shadow-xs font-extrabold'
+                    : 'text-slate-650 hover:bg-slate-200 hover:text-slate-900 active:scale-95'
                 }`}
               >
                 Cả tháng ({days.length} ngày)
@@ -1130,10 +1298,10 @@ export default function ScheduleGrid({
                   id={`week-btn-${weekNum}`}
                   type="button"
                   onClick={() => setSelectedWeek(weekNum)}
-                  className={`px-2.5 py-1 text-xs font-bold rounded transition-all cursor-pointer flex items-center gap-1 shrink-0 ${
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1 shrink-0 ${
                     selectedWeek === weekNum
-                      ? 'bg-blue-600 text-white shadow-xs'
-                      : 'text-slate-600 hover:bg-slate-300 hover:text-slate-800'
+                      ? 'bg-blue-600 text-white shadow-xs font-extrabold'
+                      : 'text-slate-650 hover:bg-slate-200 hover:text-slate-900 active:scale-95'
                   }`}
                 >
                   <span>Tuần {weekNum}</span>
@@ -1145,13 +1313,13 @@ export default function ScheduleGrid({
 
           {/* Quick Search */}
           <div className="relative w-full xl:w-64 shrink-0">
-            <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+            <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
             <input
               type="text"
               placeholder="Tìm họ tên, chuyên ngành..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-8 pr-3 py-1 text-xs bg-white border border-gray-200 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-blue-500 font-medium"
+              className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 font-medium transition-all duration-200 shadow-3xs hover:border-slate-300"
             />
           </div>
 
@@ -1262,21 +1430,23 @@ export default function ScheduleGrid({
           <div className="flex flex-wrap items-center gap-1 w-full lg:w-auto mt-1 lg:mt-0 justify-end">
             
             {/* Export current view to Excel */}
-            <button
-              id="btn-export-excel"
-              onClick={() => {
-                if (selectedWeek === 'ALL') {
-                  exportToExcel(departmentSchedules, staffList, selectedMonth);
-                } else {
-                  exportWeeklyToExcel(departmentSchedules, staffList, selectedMonth, selectedWeek, filteredDays);
-                }
-              }}
-              className="flex items-center justify-center gap-1 border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-[11px] px-3 py-1.5 rounded-lg transition-all cursor-pointer shadow-3xs"
-              title="Tải về lịch làm việc hiện tại của khoa dưới dạng file Excel đầy đủ"
-            >
-              <FileDown className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span>Xuất Excel</span>
-            </button>
+            {(currentRole === 'ADMIN' || currentRole === 'HEAD_OF_NURSING') && (
+              <button
+                id="btn-export-excel"
+                onClick={() => {
+                  if (selectedWeek === 'ALL') {
+                    exportToExcel(departmentSchedules, staffList, selectedMonth);
+                  } else {
+                    exportWeeklyToExcel(departmentSchedules, staffList, selectedMonth, selectedWeek, filteredDays);
+                  }
+                }}
+                className="flex items-center justify-center gap-1 border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-[11px] px-3 py-1.5 rounded-lg transition-all cursor-pointer shadow-3xs"
+                title="Tải về lịch làm việc hiện tại của khoa dưới dạng file Excel đầy đủ"
+              >
+                <FileDown className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>Xuất Excel</span>
+              </button>
+            )}
 
             {/* Staff directory */}
             <button
@@ -1433,42 +1603,49 @@ export default function ScheduleGrid({
               
               <th rowSpan={2} className="p-1 border-b border-r border-slate-700 text-[11.5px] sm:text-[12px] uppercase font-extrabold tracking-wider w-14 bg-[#0f172a] text-slate-200 sticky top-0 z-20" title="Tổng ngày công làm việc">Tổng công.</th>
               <th rowSpan={2} className="p-1 border-b border-r border-slate-700 text-[11.5px] sm:text-[12px] uppercase font-extrabold tracking-wider w-12 bg-[#0f172a] text-slate-200 sticky top-0 z-20" title="Cộng phép phép nghỉ P">Cộng phép</th>
-              <th rowSpan={2} className="p-1 border-b border-slate-700 text-[11.5px] sm:text-[12px] uppercase font-extrabold tracking-wider w-14 bg-[#0f172a] text-slate-200 sticky top-0 z-20">TÙY CHỌN</th>
+              <th rowSpan={2} className="p-1 border-b border-r border-slate-700 text-[11.5px] sm:text-[12px] uppercase font-extrabold tracking-wider w-14 bg-[#0f172a] text-slate-200 sticky top-0 z-20">TÙY CHỌN</th>
             </tr>
- 
+
             {/* Headers Level 2 (Individual days columns) */}
             <tr>
               {filteredDays.map((d) => {
                 const isToday = isTodayColumn(d.dateStr);
                 const isWarningDay = (currentRole === 'ADMIN' || currentRole === 'HEAD_OF_NURSING') ? false : activeDeptWarnings.has(d.dateStr);
+                const isHoliday = !!d.holiday;
+                const isHoveredCol = hoveredDate === d.dateStr;
                 return (
                   <th
                     key={d.dateStr}
                     id={`th-day-${d.dateStr}`}
-                    className={`p-0.5 border-b border-r border-slate-700 align-middle transition-all relative ${
+                    onMouseEnter={() => setHoveredDate(d.dateStr)}
+                    onMouseLeave={() => setHoveredDate(null)}
+                    className={`p-0.5 border-b border-r border-slate-700 align-middle transition-all relative cursor-pointer ${
                       isToday ? 'bg-amber-400 text-slate-900 font-black ring-2 ring-amber-300 ring-inset' :
                       isWarningDay ? 'bg-rose-900 text-rose-100 font-extrabold border-x-2 border-rose-500 animate-pulse' :
+                      isHoveredCol ? 'bg-blue-650 text-white font-black z-30 ring-1 ring-blue-400/50 shadow-xs' :
                       !d.isCurrentMonth ? 'bg-[#151c2c] text-slate-500' :
+                      isHoliday ? 'bg-red-800 text-yellow-300 font-black border-x border-red-500 ring-1 ring-red-400' :
                       d.isSunday ? 'bg-rose-950 text-rose-300 font-extrabold' : 'bg-[#1e293b] text-slate-300'
                     }`}
                     style={{ width: selectedWeek === 'ALL' ? '28px' : '36px', minWidth: selectedWeek === 'ALL' ? '28px' : '36px' }}
                     title={
-                      isWarningDay 
-                        ? `Thiếu quân số tối thiểu khoa phòng ngày này (${currentRole === 'CHIEF_NURSE' ? selectedDepartment : selectedDeptForApproval})!` 
-                        : isToday 
-                          ? "Ngày hiện tại (Hôm nay)" 
-                          : undefined
+                      isHoliday 
+                        ? `Ngày lễ: ${d.holiday?.name}`
+                        : isWarningDay 
+                          ? `Thiếu quân số tối thiểu khoa phòng ngày này (${currentRole === 'CHIEF_NURSE' ? selectedDepartment : selectedDeptForApproval})!` 
+                          : isToday 
+                            ? "Ngày hiện tại (Hôm nay)" 
+                            : undefined
                     }
                   >
-                    <div className={`text-[12px] sm:text-[12.5px] font-black leading-none ${isToday ? 'text-slate-950 font-black' : isWarningDay ? 'text-rose-100 font-black' : !d.isCurrentMonth ? 'opacity-65 text-slate-400' : ''}`}>{d.label}</div>
-                    <div className={`text-[8.5px] sm:text-[9px] leading-tight font-extrabold mt-0.5 ${isToday ? 'text-amber-950' : isWarningDay ? 'text-rose-200' : !d.isCurrentMonth ? 'text-slate-500' : d.isSunday ? 'text-rose-450' : 'text-slate-400'}`}>
-                      {d.dayIndex === 0 ? 'CN' : 'T' + (d.dayIndex + 1)}
+                    <div className={`text-[12px] sm:text-[12.5px] font-black leading-none ${isToday ? 'text-slate-950 font-black' : isWarningDay ? 'text-rose-100 font-black' : isHoveredCol ? 'text-white font-black' : isHoliday ? 'text-yellow-300' : !d.isCurrentMonth ? 'opacity-65 text-slate-400' : ''}`}>{d.label}</div>
+                    <div className={`text-[8.5px] sm:text-[9px] leading-tight font-extrabold mt-0.5 ${isToday ? 'text-amber-950' : isWarningDay ? 'text-rose-200' : isHoveredCol ? 'text-blue-100 font-semibold' : isHoliday ? 'text-red-100 uppercase' : !d.isCurrentMonth ? 'text-slate-500' : d.isSunday ? 'text-rose-450' : 'text-slate-400'}`}>
+                      {isHoliday ? (d.holiday?.shortName || 'LỄ') : d.dayIndex === 0 ? 'CN' : 'T' + (d.dayIndex + 1)}
                     </div>
                   </th>
                 );
               })}
             </tr>
- 
           </thead>
 
           {/* Table Body */}
@@ -1586,7 +1763,8 @@ export default function ScheduleGrid({
                           const targetDeptSchedule = departmentSchedules.find(s => s.department === deptSchedule.department && s.month === d.targetMonth);
                           const targetStaffSchedule = targetDeptSchedule?.schedules.find(s => s.staffId === staff.id);
                           const code = targetStaffSchedule?.schedule[d.targetDayKey] || '';
-                          const isSelected = activeCell?.staffId === staff.id && activeCell?.date === d.dateStr;
+                          const isActiveCell = activeCell?.staffId === staff.id && activeCell?.date === d.dateStr;
+                          const isSelected = isActiveCell || selectedCells.some(cell => cell.staffId === staff.id && cell.dateStr === d.dateStr);
 
                            // Dynamic styles based on symbols
                           let symbolColor = 'text-gray-400';
@@ -1594,6 +1772,8 @@ export default function ScheduleGrid({
 
                           if (!d.isCurrentMonth) {
                             cellBg = 'bg-slate-100/50';
+                          } else if (d.holiday) {
+                            cellBg = 'bg-red-50/15 border-x border-red-100/30';
                           } else if (d.isSunday) {
                             cellBg = 'bg-rose-50/20';
                           }
@@ -1613,9 +1793,11 @@ export default function ScheduleGrid({
                               ? 'text-emerald-700 bg-emerald-50/40 font-medium'
                               : 'text-emerald-600 bg-emerald-50/20 font-normal';
                           } else if (code === '0' || code === 'O') {
-                            symbolColor = d.isSunday 
-                              ? 'text-red-605 font-bold bg-rose-50' 
-                              : (d.isCurrentMonth ? 'text-rose-600 font-bold bg-rose-50/30' : 'text-rose-400 font-normal bg-rose-50/10');
+                            symbolColor = d.holiday
+                              ? 'text-red-700 font-extrabold bg-red-100/65 border border-red-200'
+                              : d.isSunday 
+                                ? 'text-red-605 font-bold bg-rose-50' 
+                                : (d.isCurrentMonth ? 'text-rose-600 font-bold bg-rose-50/30' : 'text-rose-400 font-normal bg-rose-50/10');
                           } else if (code === 'P') {
                             symbolColor = d.isCurrentMonth ? 'text-pink-800 bg-pink-50 font-bold' : 'text-pink-600 bg-pink-50/50 font-normal';
                           } else if (code === 'KL') {
@@ -1626,15 +1808,42 @@ export default function ScheduleGrid({
                             symbolColor = d.isCurrentMonth ? 'text-amber-700 bg-amber-50 font-bold' : 'text-amber-600 bg-amber-50/40 font-medium';
                           }
 
+                          const matchedSymbol = symbols.find(s => s.code === code);
+                          const symbolDesc = code 
+                            ? `${matchedSymbol?.label || code}: ${matchedSymbol?.desc || ''}`
+                            : 'Chưa xếp lịch';
+                          const cellTitle = `${staff.name} | Ngày ${d.label} | ${symbolDesc}${d.holiday ? ` (Lễ: ${d.holiday.name})` : ''}`;
+
                           return (
                             <td
                               key={d.dateStr}
                               id={`td-${staff.id}-${d.dateStr}`}
+                              title={cellTitle}
                               tabIndex={canEdit ? 0 : undefined}
+                              onMouseDown={(e) => {
+                                if (canEdit) {
+                                  handleCellMouseDown(staff.id, d.dateStr, e);
+                                }
+                              }}
+                              onMouseEnter={() => {
+                                setHoveredDate(d.dateStr);
+                                if (canEdit) {
+                                  handleCellMouseEnter(staff.id, d.dateStr);
+                                }
+                              }}
+                              onMouseLeave={() => setHoveredDate(null)}
+                              onTouchStart={(e) => {
+                                if (canEdit) {
+                                  handleTouchStart(staff.id, d.dateStr, e);
+                                }
+                              }}
+                              onTouchMove={handleTouchMove}
                               onClick={() => {
                                 if (canEdit) {
                                   setActiveCell({ staffId: staff.id, date: d.dateStr });
-                                  setIsEditingCell(enableCellDropdown);
+                                  if (selectedCells.length <= 1) {
+                                    setIsEditingCell(enableCellDropdown);
+                                  }
                                 }
                               }}
                               onDoubleClick={() => {
@@ -1646,13 +1855,16 @@ export default function ScheduleGrid({
                                 if (canEdit) {
                                   e.preventDefault();
                                   setActiveCell({ staffId: staff.id, date: d.dateStr });
+                                  setSelectedCells([{ staffId: staff.id, dateStr: d.dateStr }]);
                                   setIsEditingCell(enableCellDropdown);
                                 }
                               }}
                               className={`p-0.5 border-b border-r border-gray-100 relative group cursor-pointer transition-all select-none align-middle text-center focus:outline-hidden ${
-                                isTodayColumn(d.dateStr) ? 'bg-amber-50/25 border-x border-amber-200/50' : cellBg
+                                isTodayColumn(d.dateStr) ? 'bg-amber-50/20 border-x border-amber-200/40' : cellBg
                               } ${warningCellStyles} ${
-                                isSelected && !warningCellStyles ? 'ring-2 ring-blue-500 ring-inset bg-blue-50/60 z-10' : ''
+                                hoveredDate === d.dateStr && !isSelected && !warningCellStyles ? 'bg-blue-50/30' : ''
+                              } ${
+                                isSelected && !warningCellStyles ? 'ring-2 ring-blue-600 ring-inset bg-blue-100/50 z-20 shadow-[0_0_8px_rgba(37,99,235,0.35)] font-black' : ''
                               }`}
                               style={{ height: '32px' }}
                             >
@@ -1660,7 +1872,7 @@ export default function ScheduleGrid({
                                 {code === '' ? '—' : ((symbols.find(s => s.code === code)?.label) || code)}
                                 
                                 {/* Small visual dropdown trigger for mouse selection without key blocks */}
-                                {canEdit && isSelected && (
+                                {canEdit && isActiveCell && (
                                   <button 
                                     type="button"
                                     className="absolute right-0.5 bottom-0.5 w-3.5 h-3.5 flex items-center justify-center bg-white shadow-xs border border-blue-200 rounded text-[8px] font-bold text-blue-600 hover:bg-blue-50 transition-colors cursor-pointer z-20"
@@ -1675,7 +1887,7 @@ export default function ScheduleGrid({
                                 )}
                               </div>
 
-                              {canEdit && isSelected && isEditingCell && enableCellDropdown && (
+                              {canEdit && isActiveCell && isEditingCell && enableCellDropdown && (
                                 <>
                                   {/* Transparent backdrop spanning viewport to close custom dropdown on clicking outside */}
                                   <div 
@@ -1806,39 +2018,114 @@ export default function ScheduleGrid({
         </table>
       </div>
 
-      {/* Popover Floating Selector for Selected Cell - Sticky Viewport Footer */}
-      {activeCell && enableBottomKeypad && (
-        <div ref={footerRef} className="fixed bottom-0 left-0 right-0 z-[60] bg-slate-950 border-t border-slate-800 text-white shadow-[0_-12px_40px_rgba(0,0,0,0.65)] p-4 md:px-8 flex flex-col md:flex-row items-center justify-between gap-4 animate-fade-in">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold text-slate-300">
-              Đang phân lịch ngày {activeCell.date.includes('-') ? activeCell.date.split('-').reverse().join('/') : `${activeCell.date}/${selectedMonth.split('-')[1]}/${selectedMonth.split('-')[0]}`} cho nhân viên:
-              <span className="text-sky-450 font-black text-sm ml-1 select-all bg-sky-950/40 px-2 py-1 rounded border border-sky-850/50">
-                {getStaffDetails(activeCell.staffId)?.name}
+      {/* Drag-to-Select Batch Assign Floating Toolbar */}
+      {selectedCells.length > 1 && selectedCells.some(cell => isStaffEditable(cell.staffId)) && (
+        <div className="fixed bottom-0 left-0 right-0 z-[70] bg-slate-950 border-t-2 border-blue-500 text-white shadow-[0_-12px_40px_rgba(0,0,0,0.75)] p-4 md:px-8 flex flex-col md:flex-row items-center justify-between gap-4 animate-fade-in">
+          <div className="flex flex-col gap-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-slate-300">
+                Đang bôi đen chọn <span className="text-blue-400 font-extrabold text-sm bg-blue-950/60 px-2 py-0.5 rounded border border-blue-900/50">{selectedCells.length} ô</span> trên bảng phân ca.
               </span>
-            </span>
-            <span className="text-[10px] text-slate-400 tracking-wide uppercase font-semibold bg-slate-800 px-2 py-0.5 rounded">({getStaffDetails(activeCell.staffId)?.major})</span>
+              <span className="text-[10px] text-slate-400 tracking-wide uppercase font-semibold bg-slate-800 px-2 py-0.5 rounded">Phân lịch hàng loạt (Drag-to-Assign)</span>
+            </div>
+            <div className="hidden lg:flex flex-wrap items-center gap-1.5 text-[9.5px] text-slate-450 font-mono">
+              <span className="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-sky-400 font-bold">Gõ phím chữ: Điền ca hàng loạt</span>
+              <span className="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-rose-400 font-bold">Del/Backspace: Xóa lịch bôi đen</span>
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-center gap-1.5 w-full md:w-auto">
-            {symbols.map((sym) => (
+          <div className="flex flex-col gap-2 w-full md:w-auto">
+            <div className="flex flex-wrap items-center justify-center gap-1.5 w-full md:w-auto">
+              {symbols.map((sym) => {
+                let shortcutKey = sym.code || 'Del';
+                if (sym.code === 'X/2') shortcutKey = '2';
+                else if (sym.code === 'KL') shortcutKey = 'K';
+                else if (sym.code === 'TS') shortcutKey = 'T';
+                return (
+                  <button
+                    key={sym.code}
+                    onClick={() => handleApplyBatchCode(sym.code)}
+                    className={`px-3 py-1.5 text-xs font-bold border rounded-md cursor-pointer transition-all hover:scale-110 active:scale-95 flex flex-col items-center min-w-[56px] relative group ${sym.color}`}
+                    title={`Gán ca ${sym.label || 'Xóa'} cho tất cả các ô đã chọn`}
+                  >
+                    <span>{sym.label || 'Xóa'}</span>
+                    <span className="text-[7.5px] font-bold opacity-75 uppercase tracking-wide block mt-0.5 font-mono text-[9px] text-slate-500 bg-slate-950/5 px-1 rounded-sm border border-black/5">
+                      phím {shortcutKey}
+                    </span>
+                  </button>
+                );
+              })}
               <button
-                key={sym.code}
-                id={`sym-select-${sym.code || 'clear'}`}
-                onClick={() => handleApplyCode(sym.code)}
-                className={`px-3 py-1.5 text-xs font-bold border rounded-md cursor-pointer transition-all hover:scale-110 active:scale-95 flex flex-col items-center min-w-[52px] ${sym.color}`}
-                title={sym.desc}
+                onClick={() => {
+                  setSelectedCells([]);
+                  setActiveCell(null);
+                }}
+                className="px-3.5 py-2 text-xs border border-slate-700 bg-slate-900 rounded-md hover:bg-slate-800 text-slate-300 hover:text-white transition-colors font-medium cursor-pointer"
               >
-                <span>{sym.label || 'Trống'}</span>
-                <span className="text-[7.5px] font-normal opacity-85 block mt-0.5">{sym.desc.slice(0, 10)}</span>
+                Hủy bôi đen
               </button>
-            ))}
-            <button
-              id="btn-close-cell-edit"
-              onClick={() => setActiveCell(null)}
-              className="px-3.5 py-1.5 text-xs border border-slate-700 bg-slate-900 rounded-md hover:bg-slate-800 text-slate-300 hover:text-white transition-colors font-medium cursor-pointer"
-            >
-              Hủy / Đóng
-            </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Popover Floating Selector for Selected Cell - Sticky Viewport Footer */}
+      {activeCell && selectedCells.length <= 1 && enableBottomKeypad && (
+        <div ref={footerRef} className="fixed bottom-0 left-0 right-0 z-[60] bg-slate-950 border-t border-slate-800 text-white shadow-[0_-12px_40px_rgba(0,0,0,0.65)] p-4 md:px-8 flex flex-col md:flex-row items-center justify-between gap-4 animate-fade-in">
+          <div className="flex flex-col gap-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-slate-300">
+                Đang phân lịch ngày {activeCell.date.includes('-') ? activeCell.date.split('-').reverse().join('/') : `${activeCell.date}/${selectedMonth.split('-')[1]}/${selectedMonth.split('-')[0]}`} cho nhân viên:
+                <span className="text-sky-450 font-black text-sm ml-1 select-all bg-sky-950/40 px-2 py-1 rounded border border-sky-850/50">
+                  {getStaffDetails(activeCell.staffId)?.name}
+                </span>
+              </span>
+              <span className="text-[10px] text-slate-400 tracking-wide uppercase font-semibold bg-slate-800 px-2 py-0.5 rounded">({getStaffDetails(activeCell.staffId)?.major})</span>
+            </div>
+            {/* Visual Shortcut Guide Banner */}
+            <div className="hidden lg:flex flex-wrap items-center gap-1.5 text-[9.5px] text-slate-450 font-mono">
+              <span className="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-sky-400 font-bold">Mũi tên (← ↑ ↓ →): Di chuyển ô</span>
+              <span className="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-amber-400 font-bold">Gõ phím chữ: Điền ca nhanh</span>
+              <span className="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-rose-400 font-bold">Del/Backspace: Xóa lịch</span>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2 w-full md:w-auto">
+            <div className="flex flex-wrap items-center justify-center gap-1.5 w-full md:w-auto">
+              {symbols.map((sym) => {
+                let shortcutKey = sym.code || 'Del';
+                if (sym.code === 'X/2') shortcutKey = '2';
+                else if (sym.code === 'KL') shortcutKey = 'K';
+                else if (sym.code === 'TS') shortcutKey = 'T';
+                return (
+                  <button
+                    key={sym.code}
+                    id={`sym-select-${sym.code || 'clear'}`}
+                    onClick={() => handleApplyCode(sym.code)}
+                    className={`px-3 py-1.5 text-xs font-bold border rounded-md cursor-pointer transition-all hover:scale-110 active:scale-95 flex flex-col items-center min-w-[56px] relative group ${sym.color}`}
+                    title={`${sym.desc} (Phím tắt: ${shortcutKey})`}
+                  >
+                    <span>{sym.label || 'Xóa'}</span>
+                    <span className="text-[7.5px] font-bold opacity-75 uppercase tracking-wide block mt-0.5 font-mono text-[9px] text-slate-500 bg-slate-950/5 px-1 rounded-sm border border-black/5">
+                      phím {shortcutKey}
+                    </span>
+                  </button>
+                );
+              })}
+              <button
+                id="btn-close-cell-edit"
+                onClick={() => setActiveCell(null)}
+                className="px-3.5 py-2 text-xs border border-slate-700 bg-slate-900 rounded-md hover:bg-slate-800 text-slate-300 hover:text-white transition-colors font-medium cursor-pointer"
+              >
+                Hủy / Đóng
+              </button>
+            </div>
+            {/* Visual Shortcut Guide Banner for mobile */}
+            <div className="flex lg:hidden flex-wrap items-center justify-center gap-1.5 text-[8.5px] text-slate-450 font-mono mt-1">
+              <span className="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-sky-400 font-bold">Mũi tên: Di chuyển</span>
+              <span className="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-amber-400 font-bold">Gõ chữ: Điền ca</span>
+              <span className="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-rose-400 font-bold">Del: Xóa</span>
+            </div>
           </div>
         </div>
       )}
@@ -2033,6 +2320,8 @@ export default function ScheduleGrid({
                         { code: 'X/2', label: 'X/2', desc: 'Làm nửa ngày (0.5)', color: 'bg-emerald-50 text-emerald-700 font-bold border-emerald-200' },
                         { code: 'S', label: 'S', desc: 'Làm sáng (0.5)', color: 'bg-teal-50 text-teal-700 font-bold border-teal-200' },
                         { code: 'C', label: 'C', desc: 'Làm chiều (0.5)', color: 'bg-cyan-50 text-cyan-700 font-bold border-cyan-200' },
+                        { code: 'Đ', label: 'Đ', desc: 'Trực đêm (1.0)', color: 'bg-indigo-900 text-indigo-100 font-bold border-indigo-700' },
+                        { code: 'T', label: 'T', desc: 'Trực 24h (1.0)', color: 'bg-purple-900 text-purple-100 font-bold border-purple-700' },
                         { code: '0', label: '0', desc: 'Nghỉ cả ngày', color: 'bg-rose-100 text-rose-800 font-bold border-rose-300' },
                         { code: 'H', label: 'H', desc: 'Đi học chuyên nghiệp', color: 'bg-amber-100 text-amber-800 font-bold border-amber-300' },
                         { code: 'KL', label: 'KL', desc: 'Nghỉ không lương', color: 'bg-gray-100 text-gray-700 font-semibold border-gray-300' },
@@ -2244,7 +2533,7 @@ export default function ScheduleGrid({
       )}
 
       {/* Dynamic Excel Importer Modal */}
-      {showExcelImport && (
+      {showExcelImport && currentRole === 'ADMIN' && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden animate-scale-up text-left">
             {/* Modal Header */}

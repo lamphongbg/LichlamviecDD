@@ -9,6 +9,20 @@ export function exportToExcel(
   staffList: Record<string, Staff[]>,
   selectedMonth: string
 ) {
+  // Get dynamic head of nursing name from localStorage
+  let headOfNursingName = 'Nguyễn Thanh Hương';
+  try {
+    const cachedNames = localStorage.getItem('song_thuong_account_names_v3');
+    if (cachedNames) {
+      const parsed = JSON.parse(cachedNames);
+      if (parsed.phongdieuduong) {
+        headOfNursingName = parsed.phongdieuduong;
+      }
+    }
+  } catch (e) {
+    console.error(e);
+  }
+
   const monthParts = selectedMonth.split('-');
   const monthLabel = monthParts[1] || '03';
   const yearLabel = monthParts[0] || '2026';
@@ -28,6 +42,11 @@ export function exportToExcel(
       isSunday: dayIndex === 0,
     });
   }
+
+  const totalCols = 8 + days.length;
+  const colPart1 = Math.floor(totalCols / 3);
+  const colPart3 = Math.floor(totalCols / 3);
+  const colPart2 = totalCols - colPart1 - colPart3;
   
   // Custom helper to compute summaries
   const calculateSummary = (schedule: DaySchedule) => {
@@ -247,19 +266,27 @@ export function exportToExcel(
         
         <!-- Space Row -->
         <tr style="height: 20px; border:none;">
-          <td colspan="39" style="border:none;"></td>
+          <td colspan="${totalCols}" style="border:none;"></td>
         </tr>
         
         <!-- Signature Fields -->
         <tr>
-          <td colspan="10" class="sign-cell">Người lập bảng</td>
-          <td colspan="19" class="sign-cell">Trưởng phòng Điều dưỡng</td>
-          <td colspan="10" class="sign-cell">Giám đốc Bệnh viện</td>
+          <td colspan="${colPart1}" class="sign-cell">Người lập bảng</td>
+          <td colspan="${colPart2}" class="sign-cell">Trưởng phòng Điều dưỡng</td>
+          <td colspan="${colPart3}" class="sign-cell">Giám đốc Bệnh viện</td>
         </tr>
         <tr>
-          <td colspan="10" class="sign-sub">(Ký và ghi rõ họ tên)</td>
-          <td colspan="19" class="sign-sub">(Ký và ghi rõ họ tên)</td>
-          <td colspan="10" class="sign-sub">(Ký, đóng dấu)</td>
+          <td colspan="${colPart1}" class="sign-sub">(Ký và ghi rõ họ tên)</td>
+          <td colspan="${colPart2}" class="sign-sub">(Ký và ghi rõ họ tên)</td>
+          <td colspan="${colPart3}" class="sign-sub">(Ký, đóng dấu)</td>
+        </tr>
+        <tr style="height: 50px; border:none;">
+          <td colspan="${totalCols}" style="border:none;"></td>
+        </tr>
+        <tr>
+          <td colspan="${colPart1}" style="text-align: center; border: none; font-weight: bold; font-family: 'Times New Roman', Times, serif;">Phòng Điều dưỡng</td>
+          <td colspan="${colPart2}" style="text-align: center; border: none; font-weight: bold; font-family: 'Times New Roman', Times, serif;">${headOfNursingName}</td>
+          <td colspan="${colPart3}" style="text-align: center; border: none; font-weight: bold; font-family: 'Times New Roman', Times, serif;">Ban Giám Đốc</td>
         </tr>
       </table>
     </body>
@@ -286,6 +313,20 @@ export function exportWeeklyToExcel(
   selectedWeek: number,
   filteredDays: any[]
 ) {
+  // Get dynamic head of nursing name from localStorage
+  let headOfNursingName = 'Nguyễn Thanh Hương';
+  try {
+    const cachedNames = localStorage.getItem('song_thuong_account_names_v3');
+    if (cachedNames) {
+      const parsed = JSON.parse(cachedNames);
+      if (parsed.phongdieuduong) {
+        headOfNursingName = parsed.phongdieuduong;
+      }
+    }
+  } catch (e) {
+    console.error(e);
+  }
+
   // 1. Title dates calculations
   const getDayMonthYear = (day: any) => {
     if (day.targetMonth && day.targetDayKey) {
@@ -594,7 +635,9 @@ export function exportWeeklyToExcel(
                   
                   <!-- Week days cells with color backgrounds for off periods -->
                   ${filteredDays.map(d => {
-                    const code = staffSche?.schedule[d.dateStr] || '';
+                    const targetDeptSchedule = departmentSchedules.find(s => s.department === deptSche.department && s.month === d.targetMonth);
+                    const targetStaffSchedule = targetDeptSchedule?.schedules.find(s => s.staffId === staff.id);
+                    const code = targetStaffSchedule?.schedule[d.targetDayKey] || '';
                     const isX = code === 'X';
                     const isEmpty = code === '';
                     const bgStyle = (!isX && !isEmpty) ? 'class="cell-yellow-bg"' : 'class="cell-x"';
@@ -614,13 +657,15 @@ export function exportWeeklyToExcel(
           <!-- Days off count columns -->
           ${filteredDays.map(d => {
             let dailyOffCount = 0;
-            departmentSchedules.filter(s => s.month === selectedMonth).forEach(deptSche => {
-              deptSche.schedules.forEach(staffSche => {
-                const code = staffSche.schedule[d.dateStr] || '';
-                if (code && code !== 'X') {
-                  dailyOffCount++;
-                }
-              });
+            departmentSchedules.forEach(deptSche => {
+              if (deptSche.month === d.targetMonth) {
+                deptSche.schedules.forEach(staffSche => {
+                  const code = staffSche.schedule[d.targetDayKey] || '';
+                  if (code && code !== 'X') {
+                    dailyOffCount++;
+                  }
+                });
+              }
             });
             const formattedCount = dailyOffCount < 10 ? `0${dailyOffCount}` : `${dailyOffCount}`;
             return `<td style="font-weight: bold; text-align: center; border: 0.5pt solid #000000;">${formattedCount}</td>`;
@@ -642,7 +687,7 @@ export function exportWeeklyToExcel(
         </tr>
         <tr>
           <td colspan="5" style="border:none;"></td>
-          <td colspan="${filteredDays.length}" style="text-align: center; border: none; font-weight: bold; font-size: 11pt;">Nguyễn Thị San</td>
+          <td colspan="${filteredDays.length}" style="text-align: center; border: none; font-weight: bold; font-size: 11pt;">${headOfNursingName}</td>
         </tr>
       </table>
     </body>

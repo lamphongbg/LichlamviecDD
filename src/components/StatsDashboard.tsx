@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { DepartmentSchedule, Staff, DaySchedule, Department } from '../types';
+import { DepartmentSchedule, Staff, DaySchedule, Department, Role } from '../types';
 import { getMarch2026Days } from '../initialData';
 import { 
   Shield, Users, Calendar, AlertTriangle, TrendingUp, Award, Clock, 
   FileText, Printer, Download, Sparkles, Activity, FileSpreadsheet, 
-  Layers, CheckCircle, ChevronRight, RefreshCw
+  Layers, CheckCircle, ChevronRight, RefreshCw, Moon, Search
 } from 'lucide-react';
 import MonthSelector from './MonthSelector';
 import { exportToExcel } from './ExcelExporter';
@@ -17,6 +17,7 @@ interface StatsDashboardProps {
   aiReport?: string | null;
   aiLoading?: boolean;
   onTriggerAI?: () => void;
+  currentRole: Role;
 }
 
 // Compact and incredibly reliable client-side Markdown to Styled HTML parser
@@ -64,7 +65,8 @@ export default function StatsDashboard({
   onChangeMonth,
   aiReport,
   aiLoading = false,
-  onTriggerAI
+  onTriggerAI,
+  currentRole
 }: StatsDashboardProps) {
   const days = React.useMemo(() => {
     const [yearStr, monthStrPart] = selectedMonth.split('-');
@@ -89,7 +91,146 @@ export default function StatsDashboard({
   }, [selectedMonth]);
 
   const [selectedDeptFilter, setSelectedDeptFilter] = useState<'All' | Department>('All');
-  const [dashboardTab, setDashboardTab] = useState<'VISUAL' | 'REPORT'>('VISUAL');
+  const [dashboardTab, setDashboardTab] = useState<'VISUAL' | 'ANALYTICS' | 'REPORT'>('VISUAL');
+
+  // Search, filter, sorting states for advanced HR analytics
+  const [analyticsSearchQuery, setAnalyticsSearchQuery] = useState('');
+  const [analyticsDeptFilter, setAnalyticsDeptFilter] = useState<'All' | Department>('All');
+  const [analyticsSortBy, setAnalyticsSortBy] = useState<'night' | 'work' | 'leaves' | 'yearly'>('night');
+
+  // --- ADVANCED HR ANALYTICS COMPUTATIONS ---
+  const hrAnalyticsData = React.useMemo(() => {
+    // 1. Get all staff across all departments
+    const allStaff: (Staff & { department: Department })[] = [];
+    Object.entries(staffList).forEach(([dept, list]) => {
+      list.forEach(s => {
+        allStaff.push({ ...s, department: dept as Department });
+      });
+    });
+
+    const [currentYear] = selectedMonth.split('-');
+
+    // Find current month's department schedule mapping
+    const currentSchedulesMap = new Map<string, DaySchedule>();
+    departmentSchedules
+      .filter(s => s.month === selectedMonth)
+      .forEach(deptSched => {
+        deptSched.schedules.forEach(ss => {
+          currentSchedulesMap.set(ss.staffId, ss.schedule);
+        });
+      });
+
+    // Find all schedules in the current year for leave calculations
+    const yearlySchedulesList = departmentSchedules.filter(s => s.month.startsWith(currentYear));
+
+    // Calculate metrics for each staff
+    const staffMetrics = allStaff.map(staff => {
+      // Current Month Stats
+      const curSchedule = currentSchedulesMap.get(staff.id) || {};
+      let curWorkdays = 0;
+      let curNightShifts = 0;
+      let cur24hShifts = 0;
+      let curLeaves = 0;
+
+      Object.entries(curSchedule).forEach(([dayKey, code]) => {
+        if (dayKey.length === 2) {
+          if (code === 'X') curWorkdays += 1.0;
+          else if (code === 'Đ') {
+            curWorkdays += 1.0;
+            curNightShifts += 1;
+          } else if (code === 'T') {
+            curWorkdays += 1.0;
+            cur24hShifts += 1;
+          } else if (code === 'X/2' || code === 'S' || code === 'C') {
+            curWorkdays += 0.5;
+          } else if (code === 'P') {
+            curLeaves += 1;
+          }
+        }
+      });
+
+      // Yearly Leaves ('P' code)
+      let yearlyLeavesUsed = 0;
+      yearlySchedulesList.forEach(monthSched => {
+        const staffSched = monthSched.schedules.find(ss => ss.staffId === staff.id);
+        if (staffSched) {
+          Object.entries(staffSched.schedule).forEach(([dayKey, code]) => {
+            if (dayKey.length === 2 && code === 'P') {
+              yearlyLeavesUsed += 1;
+            }
+          });
+        }
+      });
+
+      return {
+        id: staff.id,
+        name: staff.name,
+        gender: staff.gender,
+        major: staff.major || 'Chưa rõ',
+        department: staff.department,
+        isChief: !!staff.isChief,
+        curWorkdays,
+        curNightShifts,
+        cur24hShifts,
+        curLeaves,
+        yearlyLeavesUsed,
+      };
+    });
+
+    // 2. Group by Qualification (major)
+    const qualificationStatsMap: Record<string, {
+      major: string;
+      staffCount: number;
+      totalWorkdays: number;
+      totalNightShifts: number;
+      total24hShifts: number;
+      totalLeaves: number;
+      yearlyLeaves: number;
+    }> = {};
+
+    staffMetrics.forEach(sm => {
+      const maj = sm.major;
+      if (!qualificationStatsMap[maj]) {
+        qualificationStatsMap[maj] = {
+          major: maj,
+          staffCount: 0,
+          totalWorkdays: 0,
+          totalNightShifts: 0,
+          total24hShifts: 0,
+          totalLeaves: 0,
+          yearlyLeaves: 0,
+        };
+      }
+      const q = qualificationStatsMap[maj];
+      q.staffCount += 1;
+      q.totalWorkdays += sm.curWorkdays;
+      q.totalNightShifts += sm.curNightShifts;
+      q.total24hShifts += sm.cur24hShifts;
+      q.totalLeaves += sm.curLeaves;
+      q.yearlyLeaves += sm.yearlyLeavesUsed;
+    });
+
+    const qualificationStats = Object.values(qualificationStatsMap);
+
+    return {
+      staffMetrics,
+      qualificationStats,
+    };
+  }, [departmentSchedules, staffList, selectedMonth]);
+
+  // Load custom account name for Head of Nursing
+  const headOfNursingName = React.useMemo(() => {
+    try {
+      const cachedNames = localStorage.getItem('song_thuong_account_names_v3');
+      if (cachedNames) {
+        const parsed = JSON.parse(cachedNames);
+        return parsed.phongdieuduong || 'Nguyễn Thanh Hương';
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return 'Nguyễn Thanh Hương';
+  }, []);
 
   // Dynamically filter staffs based on selected filter
   const filteredStaffs = selectedDeptFilter === 'All' 
@@ -274,6 +415,84 @@ export default function StatsDashboard({
     };
   });
 
+  // Compute Clinical Compliance metrics
+  const complianceScorecard = React.useMemo(() => {
+    // 1. Tỷ lệ Cử nhân Điều dưỡng (CNĐĐ)
+    const totalCN = qualifications['CNĐĐ'] || 0;
+    const pctCN = totalCN / (qualTotal || 1);
+    const isCnPassed = pctCN >= 0.25;
+
+    // 2. Bảo phủ nhân sự trực gác (Staffing Coverage)
+    const isStaffingPassed = warnings.length === 0;
+
+    // 3. Ngăn ngừa kiệt sức (Overwork Prevention)
+    let hasOverload = false;
+    departmentSchedules.forEach(deptSche => {
+      if (deptSche.month === selectedMonth) {
+        deptSche.schedules.forEach(staffSche => {
+          let workdays = 0;
+          Object.values(staffSche.schedule).forEach(code => {
+            if (code === 'X' || code === 'X/2' || code === 'S' || code === 'C') {
+              workdays += (code === 'X' ? 1.0 : 0.5);
+            }
+          });
+          if (workdays > 24) {
+            hasOverload = true;
+          }
+        });
+      }
+    });
+    const isOverloadPassed = !hasOverload;
+
+    // 4. Giám sát quản lý (Supervision Presence)
+    let hasSupervision = true;
+    let checkedDeptsCount = 0;
+    Object.keys(staffList).forEach(deptName => {
+      const sched = departmentSchedules.find(s => s.department === deptName && s.month === selectedMonth);
+      if (sched) {
+        checkedDeptsCount++;
+        const staffsOfDept = staffList[deptName] || [];
+        const chief = staffsOfDept.find(s => s.isChief);
+        if (chief) {
+          const chiefSched = sched.schedules.find(s => s.staffId === chief.id);
+          if (chiefSched) {
+            let totalActive = 0;
+            Object.values(chiefSched.schedule).forEach(code => {
+              if (code === 'X' || code === 'X/2' || code === 'S' || code === 'C') {
+                totalActive += (code === 'X' ? 1.0 : 0.5);
+              }
+            });
+            if (totalActive < 10) { // Chief nurse should have at least 10 shifts/workdays
+              hasSupervision = false;
+            }
+          } else {
+            hasSupervision = false;
+          }
+        } else {
+          hasSupervision = false;
+        }
+      }
+    });
+    const isSupervisionPassed = checkedDeptsCount > 0 ? hasSupervision : true;
+
+    // Total score
+    let score = 0;
+    if (isCnPassed) score += 25;
+    if (isStaffingPassed) score += 25;
+    if (isOverloadPassed) score += 25;
+    if (isSupervisionPassed) score += 25;
+
+    return {
+      pctCN,
+      isCnPassed,
+      isStaffingPassed,
+      isOverloadPassed,
+      isSupervisionPassed,
+      score,
+      warningsCount: warnings.length
+    };
+  }, [qualifications, qualTotal, warnings, departmentSchedules, selectedMonth, staffList]);
+
   // SVG parameters for dynamic days attendance sheet trending line
   const maxAttendance = Math.max(...dailyAttendance, 1);
   const paddingX = 40;
@@ -377,6 +596,17 @@ export default function StatsDashboard({
             <span>Biểu đồ trực quan</span>
           </button>
           <button
+            onClick={() => setDashboardTab('ANALYTICS')}
+            className={`flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+              dashboardTab === 'ANALYTICS'
+                ? 'bg-white text-slate-900 shadow-xs'
+                : 'text-gray-500 hover:text-gray-900'
+            }`}
+          >
+            <Activity className="w-4 h-4" />
+            <span>Phân tích HR &amp; Công phép</span>
+          </button>
+          <button
             onClick={() => setDashboardTab('REPORT')}
             className={`flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
               dashboardTab === 'REPORT'
@@ -385,7 +615,7 @@ export default function StatsDashboard({
             }`}
           >
             <FileText className="w-4 h-4" />
-            <span>Báo cáo Chi tiết & Rà soát AI</span>
+            <span>Báo cáo Chi tiết &amp; Rà soát AI</span>
           </button>
         </div>
 
@@ -398,13 +628,15 @@ export default function StatsDashboard({
               <Printer className="w-3.5 h-3.5" />
               <span>In Báo Cáo</span>
             </button>
-            <button
-              onClick={() => exportToExcel(departmentSchedules, staffList, selectedMonth)}
-              className="flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold text-xs px-3 py-1.5 rounded-lg border border-emerald-200 transition-colors cursor-pointer"
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5" />
-              <span>Xuất Excel</span>
-            </button>
+            {(currentRole === 'ADMIN' || currentRole === 'HEAD_OF_NURSING') && (
+              <button
+                onClick={() => exportToExcel(departmentSchedules, staffList, selectedMonth)}
+                className="flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold text-xs px-3 py-1.5 rounded-lg border border-emerald-200 transition-colors cursor-pointer"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>Xuất Excel</span>
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -650,6 +882,256 @@ export default function StatsDashboard({
             )}
           </div>
         </>
+      ) : dashboardTab === 'ANALYTICS' ? (
+        <div className="space-y-6">
+          {/* Advanced HR Analytics Panel */}
+          <div className="bg-gradient-to-br from-[#0f172a] to-[#1e293b] p-6 rounded-2xl border border-slate-800 text-white shadow-lg relative overflow-hidden">
+            <div className="absolute right-0 top-0 opacity-10">
+              <Activity className="w-64 h-64 text-blue-400" />
+            </div>
+            <div className="relative space-y-2 max-w-2xl">
+              <span className="px-2.5 py-1 bg-blue-500/10 border border-blue-500/20 text-blue-400 rounded-full text-[10px] font-black uppercase tracking-wider">
+                Advanced HR Analytics
+              </span>
+              <h2 className="text-xl font-black tracking-tight font-sans uppercase">
+                Phân tích chuyên sâu Hiệu suất &amp; Công lao động
+              </h2>
+              <p className="text-xs text-slate-300 leading-relaxed font-medium">
+                Biểu đồ phân tích trực quan nâng cao giúp Phòng Điều dưỡng có cái nhìn tổng quan về tỷ lệ phân ca, tần suất trực đêm, tổng phép đã nghỉ và cơ cấu kíp trực để điều phối nhân sự hiệu quả giữa các khoa phòng khi có tình trạng quá tải cục bộ.
+              </p>
+            </div>
+          </div>
+
+          {/* Bento Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            {/* 1. Qualification Shift Distribution & Workload Balance */}
+            <div className="lg:col-span-5 bg-white p-5 rounded-2xl border border-gray-150 shadow-xs flex flex-col gap-4">
+              <div className="flex items-center gap-2 border-b border-gray-100 pb-3">
+                <div className="p-2 bg-purple-50 text-purple-600 rounded-lg">
+                  <Award className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-slate-800 uppercase tracking-wide">
+                    Phân phối ca theo Trình độ
+                  </h3>
+                  <p className="text-[10px] text-gray-400 font-medium">Phân phối ca trực (CNĐD, CĐĐĐ, ĐDTC...)</p>
+                </div>
+              </div>
+
+              <p className="text-xs text-gray-500 font-semibold leading-relaxed">
+                So sánh định mức lao động trung bình của từng chức danh trình độ đào tạo trong tháng {selectedMonth}. Giúp cân bằng khối lượng công việc chuyên môn.
+              </p>
+
+              <div className="space-y-4 flex-1">
+                {hrAnalyticsData.qualificationStats.map((stat, idx) => {
+                  const avgWorkdays = stat.staffCount > 0 ? (stat.totalWorkdays / stat.staffCount).toFixed(1) : '0';
+                  const maxExpectedWorkdays = 22; // Standard monthly workdays
+                  const progressPercent = Math.min(100, (parseFloat(avgWorkdays) / maxExpectedWorkdays) * 100);
+
+                  return (
+                    <div key={idx} className="p-3.5 bg-slate-50 rounded-xl border border-gray-150/80 space-y-2.5">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-black text-slate-800 bg-purple-50 text-purple-700 px-2.5 py-0.5 rounded-md border border-purple-150/60 font-sans">
+                          {stat.major}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-bold">
+                          {stat.staffCount} nhân sự
+                        </span>
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-[10.5px]">
+                          <span className="text-slate-500 font-bold">Số công TB / người:</span>
+                          <span className="font-extrabold text-slate-800">{avgWorkdays} / 22 công</span>
+                        </div>
+                        <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
+                          <div 
+                            className={`h-full rounded-full transition-all duration-500 ${
+                              parseFloat(avgWorkdays) > 24 
+                                ? 'bg-rose-500' 
+                                : parseFloat(avgWorkdays) >= 18 
+                                ? 'bg-emerald-500' 
+                                : 'bg-blue-500'
+                            }`}
+                            style={{ width: `${progressPercent}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 text-center pt-1 border-t border-dashed border-gray-200">
+                        <div className="leading-tight">
+                          <span className="text-[9px] text-gray-400 block font-bold">Tổng Công</span>
+                          <span className="text-xs font-black text-slate-800 font-mono">{stat.totalWorkdays}</span>
+                        </div>
+                        <div className="leading-tight">
+                          <span className="text-[9px] text-gray-400 block font-bold">Trực Đêm</span>
+                          <span className="text-xs font-black text-indigo-700 font-mono">{stat.totalNightShifts}</span>
+                        </div>
+                        <div className="leading-tight">
+                          <span className="text-[9px] text-gray-400 block font-bold">Nghỉ Phép</span>
+                          <span className="text-xs font-black text-emerald-700 font-mono">{stat.totalLeaves}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 2. Interactive Staff Ranks (Night Shifts & Yearly Leaves) */}
+            <div className="lg:col-span-7 bg-white p-5 rounded-2xl border border-gray-150 shadow-xs flex flex-col gap-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
+                    <Moon className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-slate-800 uppercase tracking-wide">
+                      Tần suất Trực &amp; Phép chi tiết
+                    </h3>
+                    <p className="text-[10px] text-gray-400 font-medium">Bảng xếp hạng khối lượng lao động từng người</p>
+                  </div>
+                </div>
+
+                {/* Filters */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={analyticsSortBy}
+                    onChange={(e) => setAnalyticsSortBy(e.target.value as any)}
+                    className="p-1.5 border border-gray-250 bg-white rounded-lg text-[10.5px] font-black text-slate-700 focus:outline-hidden"
+                  >
+                    <option value="night">Trực đêm nhiều nhất</option>
+                    <option value="work">Tổng công cao nhất</option>
+                    <option value="leaves">Phép trong tháng</option>
+                    <option value="yearly">Phép lũy kế năm</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Search & Dept Filter Bar */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-gray-400" />
+                  <input
+                    type="text"
+                    value={analyticsSearchQuery}
+                    onChange={(e) => setAnalyticsSearchQuery(e.target.value)}
+                    placeholder="Tìm tên nhân viên..."
+                    className="w-full pl-8 pr-3 py-1.5 border border-gray-200 bg-slate-50/50 rounded-xl text-xs font-bold placeholder-gray-400 focus:outline-hidden focus:border-blue-500 focus:bg-white transition-all"
+                  />
+                </div>
+                <div>
+                  <select
+                    value={analyticsDeptFilter}
+                    onChange={(e) => setAnalyticsDeptFilter(e.target.value as any)}
+                    className="w-full p-1.5 border border-gray-200 bg-slate-50/50 rounded-xl text-xs font-bold text-slate-700 focus:outline-hidden"
+                  >
+                    <option value="All">Tất cả khoa phòng</option>
+                    {Object.keys(staffList).map((dept) => (
+                      <option key={dept} value={dept}>{dept}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Staff Table / List */}
+              <div className="flex-1 max-h-[380px] overflow-y-auto border border-gray-100 rounded-xl shadow-3xs">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-gray-150 text-[10px] text-slate-400 uppercase font-black tracking-wider sticky top-0 z-10">
+                      <th className="p-2.5 pl-3.5">Họ tên / Khoa</th>
+                      <th className="p-2.5 text-center">Trình độ</th>
+                      <th className="p-2.5 text-center">Ca Đêm (Đ)</th>
+                      <th className="p-2.5 text-center">Trực 24h (T)</th>
+                      <th className="p-2.5 text-center">Công Tháng</th>
+                      <th className="p-2.5 pr-3.5 text-right font-black text-slate-500">Phép năm lũy kế</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 text-xs">
+                    {(() => {
+                      const filtered = hrAnalyticsData.staffMetrics
+                        .filter(sm => {
+                          const matchesSearch = sm.name.toLowerCase().includes(analyticsSearchQuery.toLowerCase());
+                          const matchesDept = analyticsDeptFilter === 'All' || sm.department === analyticsDeptFilter;
+                          return matchesSearch && matchesDept;
+                        })
+                        .sort((a, b) => {
+                          if (analyticsSortBy === 'night') return b.curNightShifts - a.curNightShifts;
+                          if (analyticsSortBy === 'work') return b.curWorkdays - a.curWorkdays;
+                          if (analyticsSortBy === 'leaves') return b.curLeaves - a.curLeaves;
+                          if (analyticsSortBy === 'yearly') return b.yearlyLeavesUsed - a.yearlyLeavesUsed;
+                          return 0;
+                        });
+
+                      if (filtered.length === 0) {
+                        return (
+                          <tr>
+                            <td colSpan={6} className="p-8 text-center text-xs font-semibold italic text-gray-400">
+                              Không tìm thấy nhân viên phù hợp bộ lọc.
+                            </td>
+                          </tr>
+                        );
+                      }
+
+                      return filtered.map((staff, i) => (
+                        <tr key={i} className="hover:bg-slate-50/70 transition-colors">
+                          <td className="p-2.5 pl-3.5">
+                            <span className="font-bold text-slate-800 block leading-tight">{staff.name}</span>
+                            <span className="text-[9.5px] text-slate-400 font-bold block mt-0.5">{staff.department}</span>
+                          </td>
+                          <td className="p-2.5 text-center">
+                            <span className="text-[9.5px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-black border border-slate-200">
+                              {staff.major}
+                            </span>
+                          </td>
+                          <td className="p-2.5 text-center">
+                            <span className={`text-xs font-black ${staff.curNightShifts > 4 ? 'text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded border border-rose-100' : 'text-indigo-600'}`}>
+                              {staff.curNightShifts}
+                            </span>
+                          </td>
+                          <td className="p-2.5 text-center font-bold text-purple-600">
+                            {staff.cur24hShifts}
+                          </td>
+                          <td className="p-2.5 text-center font-black text-slate-800 font-mono">
+                            {staff.curWorkdays}
+                          </td>
+                          <td className="p-2.5 pr-3.5 text-right font-black text-emerald-700 font-mono">
+                            {staff.yearlyLeavesUsed} <span className="text-[9px] text-slate-400 font-bold font-sans">ngày</span>
+                          </td>
+                        </tr>
+                      ));
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+          </div>
+
+          {/* 3. Operational Highlights & Alert Dashboard */}
+          <div className="bg-amber-50/40 border border-amber-200/50 p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-600 rounded-xl mt-0.5">
+                <AlertTriangle className="w-5 h-5 animate-pulse" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="text-xs font-black text-amber-900 uppercase tracking-wide">
+                  Đề xuất điều phối lâm bạ &amp; Kiệt sức (Anti-Burnout Insight)
+                </h4>
+                <p className="text-[11px] text-amber-800 leading-relaxed font-semibold">
+                  {(() => {
+                    const overloads = hrAnalyticsData.staffMetrics.filter(sm => sm.curNightShifts > 4 || sm.curWorkdays > 24);
+                    if (overloads.length > 0) {
+                      return `Hệ thống phân tích phát hiện có ${overloads.length} nhân viên (như ${overloads.slice(0, 2).map(o => o.name).join(', ')}${overloads.length > 2 ? '...' : ''}) đang có tần suất trực đêm quá dầy (>4 đêm) hoặc đi làm vượt định mức tối đa (>24 công) trong tháng. Khuyến nghị điều phối nhân viên từ các khoa khác sang hỗ trợ trực chéo để tránh kiệt sức nghề nghiệp y tế.`;
+                    }
+                    return 'Tuyệt vời! Hiện tại phân phối ca trực và kíp trực đêm của các nhân viên y tế đang nằm trong ngưỡng an toàn lao động y tế (<4 đêm trực/người), không phát hiện rủi ro kiệt sức do quá tải.';
+                  })()}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
       ) : (
         /* Detailed Medical/Operational Report & AI Audit Tab */
         <div id="printable-report-area" className="bg-white p-6 sm:p-8 rounded-2xl border border-gray-200 shadow-md flex flex-col gap-8">
@@ -762,12 +1244,124 @@ export default function StatsDashboard({
             </div>
           </div>
 
+          {/* Clinical Compliance Scorecard Component */}
+          <div className="flex flex-col gap-3">
+            <h3 className="text-xs sm:text-sm font-black text-gray-800 uppercase tracking-wide border-b border-gray-100 pb-2 flex items-center gap-1.5">
+              <Shield className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>2. Thẩm định quy chuẩn vận hành lâm sàng &amp; An toàn kíp trực</span>
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              
+              {/* Criterion 1 */}
+              <div className="p-3.5 rounded-xl border border-slate-150 bg-slate-50/50 flex flex-col justify-between gap-2">
+                <div className="flex items-start justify-between gap-1">
+                  <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Tỷ lệ Cử nhân ĐĐ</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[8.5px] font-black uppercase ${
+                    complianceScorecard.isCnPassed 
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                      : 'bg-rose-50 text-rose-700 border border-rose-200'
+                  }`}>
+                    {complianceScorecard.isCnPassed ? 'ĐẠT' : 'CẦN CHỈNH'}
+                  </span>
+                </div>
+                <div className="leading-tight">
+                  <span className="text-sm font-black text-slate-800 font-mono">{(complianceScorecard.pctCN * 100).toFixed(1)}%</span>
+                  <span className="text-[9.5px] text-slate-500 block mt-0.5">Yêu cầu tối thiểu &gt;= 25% tổng biên chế lâm sàng để đảm bảo an toàn kỹ thuật cao.</span>
+                </div>
+              </div>
+
+              {/* Criterion 2 */}
+              <div className="p-3.5 rounded-xl border border-slate-150 bg-slate-50/50 flex flex-col justify-between gap-2">
+                <div className="flex items-start justify-between gap-1">
+                  <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Trực gác tối thiểu</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[8.5px] font-black uppercase ${
+                    complianceScorecard.isStaffingPassed 
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                      : 'bg-rose-50 text-rose-700 border border-rose-200 animate-pulse'
+                  }`}>
+                    {complianceScorecard.isStaffingPassed ? 'ĐẠT' : 'CÓ VI PHẠM'}
+                  </span>
+                </div>
+                <div className="leading-tight">
+                  <span className="text-sm font-black text-slate-800 font-mono">
+                    {complianceScorecard.isStaffingPassed ? 'Không phát hiện thiếu hụt' : `${complianceScorecard.warningsCount} ngày thiếu`}
+                  </span>
+                  <span className="text-[9.5px] text-slate-500 block mt-0.5">Các ca trực bắt buộc phải có ít nhất 1-3 ĐĐ làm việc tùy quy định đặc thù khoa phòng.</span>
+                </div>
+              </div>
+
+              {/* Criterion 3 */}
+              <div className="p-3.5 rounded-xl border border-slate-150 bg-slate-50/50 flex flex-col justify-between gap-2">
+                <div className="flex items-start justify-between gap-1">
+                  <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Ngăn ngừa kiệt sức</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[8.5px] font-black uppercase ${
+                    complianceScorecard.isOverloadPassed 
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                      : 'bg-amber-50 text-amber-700 border border-amber-200'
+                  }`}>
+                    {complianceScorecard.isOverloadPassed ? 'AN TOÀN' : 'CẢNH BÁO'}
+                  </span>
+                </div>
+                <div className="leading-tight">
+                  <span className="text-sm font-black text-slate-800 font-mono">
+                    {complianceScorecard.isOverloadPassed ? 'Trực tối đa <= 24 công' : 'Có ĐĐ làm quá 24 công'}
+                  </span>
+                  <span className="text-[9.5px] text-slate-500 block mt-0.5">Định mức an toàn giới hạn số ngày đi làm tối đa trong tháng để giữ sức khỏe điều dưỡng.</span>
+                </div>
+              </div>
+
+              {/* Criterion 4 */}
+              <div className="p-3.5 rounded-xl border border-slate-150 bg-slate-50/50 flex flex-col justify-between gap-2">
+                <div className="flex items-start justify-between gap-1">
+                  <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Chỉ đạo &amp; Giám sát</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[8.5px] font-black uppercase ${
+                    complianceScorecard.isSupervisionPassed 
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                      : 'bg-rose-50 text-rose-700 border border-rose-200'
+                  }`}>
+                    {complianceScorecard.isSupervisionPassed ? 'ĐỦ GIÁM SÁT' : 'THIẾU CHỈ ĐẠO'}
+                  </span>
+                </div>
+                <div className="leading-tight">
+                  <span className="text-sm font-black text-slate-800 font-mono">
+                    {complianceScorecard.isSupervisionPassed ? 'ĐD Trưởng trực tốt' : 'ĐD Trưởng trực quá ít'}
+                  </span>
+                  <span className="text-[9.5px] text-slate-500 block mt-0.5">Đảm bảo vai trò điều hành chính của Điều dưỡng trưởng luôn hoạt động đều trong tháng.</span>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Score progress bar */}
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-3xs">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">Điểm chất lượng quy chuẩn lâm sàng:</span>
+                <span className={`text-sm font-black ${
+                  complianceScorecard.score >= 75 ? 'text-emerald-700' : 'text-amber-700'
+                }`}>{complianceScorecard.score}/100</span>
+              </div>
+              <div className="flex-1 max-w-sm bg-slate-200 h-2 rounded-full overflow-hidden">
+                <div 
+                  className={`h-full rounded-full transition-all duration-500 ${
+                    complianceScorecard.score >= 75 ? 'bg-emerald-500' : 'bg-amber-500'
+                  }`} 
+                  style={{ width: `${complianceScorecard.score}%` }} 
+                />
+              </div>
+              <span className="text-[10px] text-slate-400 font-bold italic">
+                {complianceScorecard.score === 100 
+                  ? '✔ Đạt tiêu chuẩn ISO lâm sàng tối ưu' 
+                  : '⚠ Cần điều chỉnh một số ca trực đề xuất'}
+              </span>
+            </div>
+          </div>
+
           {/* 5. Competency Structure and Demographics */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="flex flex-col gap-3">
               <h3 className="text-xs sm:text-sm font-black text-gray-800 uppercase tracking-wide border-b border-gray-100 pb-2 flex items-center gap-1.5">
                 <Award className="w-4 h-4 text-purple-600 shrink-0" />
-                <span>2. Đánh giá chất lượng &amp; cơ cấu chuyên ngành</span>
+                <span>3. Đánh giá chất lượng &amp; cơ cấu chuyên ngành</span>
               </h3>
               <div className="p-4 bg-purple-50/40 rounded-xl border border-purple-100/60 flex flex-col gap-3">
                 <p className="text-xs text-gray-600 leading-relaxed font-semibold">
@@ -791,7 +1385,7 @@ export default function StatsDashboard({
             <div className="flex flex-col gap-3">
               <h3 className="text-xs sm:text-sm font-black text-gray-800 uppercase tracking-wide border-b border-gray-100 pb-2 flex items-center gap-1.5">
                 <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
-                <span>3. Danh sách cảnh báo rủi ro an toàn vận hành</span>
+                <span>4. Danh sách cảnh báo rủi ro an toàn vận hành</span>
               </h3>
               <div className="flex-1 p-4 bg-rose-50/45 rounded-xl border border-rose-100/60 flex flex-col gap-2.5 max-h-[170px] overflow-y-auto">
                 {warnings.length === 0 ? (
@@ -822,7 +1416,7 @@ export default function StatsDashboard({
           <div className="flex flex-col gap-3">
             <h3 className="text-xs sm:text-sm font-black text-amber-800 uppercase tracking-wide border-b border-amber-100 pb-2 flex items-center gap-1.5">
               <Sparkles className="w-4 h-4 text-amber-500 shrink-0" />
-              <span>4. Kết quả rà soát chi tiết bằng trí tuệ nhân tạo (AI Audit Report)</span>
+              <span>5. Kết quả rà soát chi tiết bằng trí tuệ nhân tạo (AI Audit Report)</span>
             </h3>
 
             {aiLoading ? (
@@ -898,7 +1492,7 @@ export default function StatsDashboard({
               <span className="font-bold text-gray-800">Trưởng phòng Điều dưỡng</span>
               <div>
                 <div className="h-10"></div>
-                <span className="font-extrabold text-gray-900 block">Nguyễn Thị San</span>
+                <span className="font-extrabold text-gray-900 block">{headOfNursingName}</span>
                 <span className="text-[10px] text-gray-400">(Ký, ghi rõ họ tên)</span>
               </div>
             </div>
